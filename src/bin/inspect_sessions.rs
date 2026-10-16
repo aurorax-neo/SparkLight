@@ -1,7 +1,7 @@
 use anyhow::Result;
 use chrono::Utc;
 use serde_json::Value;
-use sparklight::crypto::SecretBox;
+use sparklight::crypto::load_or_create_master_key;
 use sqlx::sqlite::SqlitePoolOptions;
 use std::path::Path;
 
@@ -16,9 +16,7 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
-    let master_key = std::fs::read(&key_file)?;
-    let key_array: [u8; 32] = master_key.try_into().map_err(|_| anyhow::anyhow!("invalid key length"))?;
-    let secret_box = SecretBox::new(&key_array);
+    let secret_box = load_or_create_master_key(Path::new(&data_dir))?;
     let pool = SqlitePoolOptions::new().connect(&format!("sqlite://{}", db_file.display())).await?;
 
     let accounts: Vec<(String, String, Option<String>, Option<String>, Vec<u8>, String)> =

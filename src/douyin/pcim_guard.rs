@@ -137,11 +137,17 @@ impl GuardKey {
         Ok(headers)
     }
 }
-#[derive(Deserialize, Serialize, Clone)]
-pub struct ServerMaterial { pub ticket: String, pub ts_sign: String, pub client_cert: String }
+#[derive(Deserialize, Serialize, Clone, Debug)]
+pub struct ServerMaterial {
+    pub ticket: String,
+    pub ts_sign: String,
+    pub client_cert: String,
+    #[serde(default)]
+    pub create_time: Option<i64>,
+}
 #[derive(Serialize)]
 struct ClientData<'a> { ts_sign: &'a str, req_content: &'a str, req_sign: &'a str, timestamp: i64 }
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct BoundGuardMaterial { pub data: ServerMaterial, pub uid: u64, pub session_hash: String, pub acquired_at: i64, pub public: String }
 impl BoundGuardMaterial {
     pub fn server_data_json(&self) -> Result<String> {
@@ -150,6 +156,11 @@ impl BoundGuardMaterial {
     pub fn from_saved(json: &str, uid: u64, cookie: &str, acquired_at: i64, expected_public: &str) -> Result<Self> {
         let data: ServerMaterial = serde_json::from_str(json).context("GUARD_DESERIALIZE_SERVER_DATA")?;
         ensure!(data.client_cert.strip_prefix("pub.") == Some(expected_public), "GUARD_KEY_BINDING_MISMATCH");
+        if let Some(ct) = data.create_time {
+            let now = chrono::Utc::now().timestamp();
+            // 票据生成时间早于 3 天前判定为失效票据，拒绝发送以防被平台 KICK 封禁会话
+            ensure!(ct <= 0 || now.saturating_sub(ct) <= 86400 * 3, "GUARD_MATERIAL_EXPIRED_BY_CREATE_TIME");
+        }
         Ok(Self {
             data,
             uid,
@@ -265,6 +276,32 @@ mod tests {
         }
         // 解析失败没有修改先前已绑定材料。
         assert_eq!(sign(&a),sign(&b));
+    }
+
+    #[test]
+    fn from_saved_rejects_ancient_create_time() {
+        let key = key(1);
+        let now = chrono::Utc::now().timestamp();
+        let ancient_time = now - 86400 * 25; // 25天前
+        let json = serde_json::to_string(&serde_json::json!({
+            "ticket": "hash.ancient",
+            "ts_sign": "ts.2.test",
+            "client_cert": format!("pub.{}", key.public_key_base64()),
+            "create_time": ancient_time
+        })).unwrap();
+
+        let err = BoundGuardMaterial::from_saved(&json, 1, COOKIE, now, &key.public_key_base64());
+        assert!(err.is_err(), "25天前生成的古老票据必须被拒绝以防平台 KICK");
+        assert!(err.unwrap_err().to_string().contains("EXPIRED_BY_CREATE_TIME"));
+
+        let fresh_time = now - 3600; // 1小时前
+        let fresh_json = serde_json::to_string(&serde_json::json!({
+            "ticket": "hash.fresh",
+            "ts_sign": "ts.2.test",
+            "client_cert": format!("pub.{}", key.public_key_base64()),
+            "create_time": fresh_time
+        })).unwrap();
+        assert!(BoundGuardMaterial::from_saved(&fresh_json, 1, COOKIE, now, &key.public_key_base64()).is_ok());
     }
 }
 

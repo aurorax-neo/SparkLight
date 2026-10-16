@@ -98,20 +98,33 @@ pub fn parse_credential_full(raw: &str) -> ParsedCredential {
             let srv_data = val.get("guard_server_data")
                 .or_else(|| val.pointer("/guard/server_data"))
                 .and_then(|v| {
-                    if let Some(s) = v.as_str() {
+                    let mut s = if let Some(s) = v.as_str() {
                         let trimmed = s.trim();
                         if trimmed.is_empty() { return None; }
                         if trimmed.starts_with('"') && trimmed.ends_with('"') {
-                            if let Ok(unquoted) = serde_json::from_str::<String>(trimmed) {
-                                return Some(unquoted);
+                            serde_json::from_str::<String>(trimmed).unwrap_or_else(|_| trimmed.to_string())
+                        } else {
+                            trimmed.to_string()
+                        }
+                    } else if v.is_object() {
+                        serde_json::to_string(v).ok()?
+                    } else {
+                        return None;
+                    };
+
+                    // 解包可能嵌套的 {"data": "{\"ticket\": ...}"} 或 {"data": {"ticket": ...}}
+                    if let Ok(val) = serde_json::from_str::<serde_json::Value>(&s) {
+                        if let Some(inner) = val.get("data") {
+                            if let Some(inner_str) = inner.as_str() {
+                                s = inner_str.trim().to_string();
+                            } else if inner.is_object() {
+                                if let Ok(inner_json) = serde_json::to_string(inner) {
+                                    s = inner_json;
+                                }
                             }
                         }
-                        Some(trimmed.to_string())
-                    } else if v.is_object() {
-                        serde_json::to_string(v).ok()
-                    } else {
-                        None
                     }
+                    Some(s)
                 });
             let guard = match (priv_key, srv_data) {
                 (Some(k), Some(d)) => Some((k, d)),
@@ -1346,6 +1359,37 @@ mod tests {
 
     #[test]
     fn test_client_creation_and_cookie_stripping() {
+        let cookie_raw = " sessionid=abc123xyz;\r\n passport_csrf_token=def456; \n";
+        let client = DouyinClient::new(cookie_raw, "test_account").expect("create client");
+        assert_eq!(client.get_current_cookie(), "sessionid=abc123xyz; passport_csrf_token=def456;");
+        assert_eq!(client.account_alias, "test_account");
+    }
+
+    #[test]
+    fn test_parse_credential_full_nested_data_unpacking() {
+        let inner_srv = r#"{"ticket":"hash.test","ts_sign":"ts.2.test","client_cert":"pub.test","create_time":1792147876}"#;
+        let wrapped_srv = format!(r#"{{"data": "{}"}}"#, inner_srv.replace('"', r#"\""#));
+
+        let raw_json = serde_json::json!({
+            "cookie": "sessionid=test_session_123; passport_csrf_token=test_token",
+            "guard_private_key": "0101010101010101010101010101010101010101010101010101010101010101",
+            "guard_server_data": wrapped_srv,
+            "uid": "123456",
+            "nickname": "测试用户"
+        }).to_string();
+
+        let parsed = parse_credential_full(&raw_json);
+        assert_eq!(parsed.uid.as_deref(), Some("123456"));
+        assert_eq!(parsed.nickname.as_deref(), Some("测试用户"));
+        let (priv_key, srv_data) = parsed.guard.expect("guard parsed");
+        assert_eq!(priv_key, "0101010101010101010101010101010101010101010101010101010101010101");
+        let srv_obj: serde_json::Value = serde_json::from_str(&srv_data).expect("valid json");
+        assert_eq!(srv_obj["ticket"], "hash.test");
+        assert_eq!(srv_obj["create_time"], 1792147876);
+    }
+
+    #[test]
+    fn test_client_creation_and_cookie_stripping_base() {
         let cookie_raw = " sessionid=abc123xyz;\r\n passport_csrf_token=def456; \n";
         let client = DouyinClient::new(cookie_raw, "test_account").expect("create client");
         assert_eq!(client.get_current_cookie(), "sessionid=abc123xyz; passport_csrf_token=def456;");

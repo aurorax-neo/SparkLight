@@ -1,7 +1,7 @@
 export const TAMPERMONKEY_SCRIPT: string = `// ==UserScript==
 // @name         SparkLight 抖音凭证一键全自动提取助手
 // @namespace    https://sparklight.local/
-// @version      2.2.0
+// @version      2.2.1
 // @description  一键全自动提取抖音完整登录凭证（包含 HttpOnly Cookie 与 Guard 签名私钥/票据），100% 纯本地复制，免除手动抓包
 // @author       SparkLight
 // @match        https://*.douyin.com/*
@@ -169,12 +169,40 @@ export const TAMPERMONKEY_SCRIPT: string = `// ==UserScript==
     } catch (_) {}
 
     try {
-      const signLogin = localStorage.getItem('security-sdk/s_sdk_sign_data_key/login');
       const signProtect = localStorage.getItem('security-sdk/s_sdk_sign_data_key/web_protect');
-      const chosen = signLogin || signProtect;
-      if (chosen) {
-        const parsed = JSON.parse(chosen);
-        guardServerData = typeof parsed === 'string' ? parsed : JSON.stringify(parsed);
+      const signLogin = localStorage.getItem('security-sdk/s_sdk_sign_data_key/login');
+
+      const parseTicketObj = (raw) => {
+        if (!raw) return null;
+        try {
+          let p = JSON.parse(raw);
+          if (p && typeof p === 'object' && p.data) {
+            p = typeof p.data === 'string' ? JSON.parse(p.data) : p.data;
+          } else if (typeof p === 'string') {
+            p = JSON.parse(p);
+          }
+          if (p && typeof p === 'object' && p.ticket && p.ts_sign && p.client_cert) {
+            return p;
+          }
+        } catch (_) {}
+        return null;
+      };
+
+      const protectTicket = parseTicketObj(signProtect);
+      const loginTicket = parseTicketObj(signLogin);
+      let chosenObj = protectTicket;
+      if (!chosenObj || (loginTicket && (loginTicket.create_time || 0) > (chosenObj.create_time || 0))) {
+        chosenObj = loginTicket || chosenObj;
+      }
+
+      if (chosenObj) {
+        guardServerData = JSON.stringify({
+          ticket: chosenObj.ticket,
+          ts_sign: chosenObj.ts_sign,
+          client_cert: chosenObj.client_cert,
+          log_id: chosenObj.log_id || '',
+          create_time: chosenObj.create_time || 0
+        });
       }
     } catch (_) {}
 
