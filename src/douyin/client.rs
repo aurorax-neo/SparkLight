@@ -304,7 +304,10 @@ impl DouyinClient {
         let uid=self.verified_sender_uid(expected_uid)?;
         let cookie=self.get_current_cookie();
         let now=chrono::Utc::now().timestamp();
-        if self.web_context.lock().unwrap().as_ref().is_some_and(|c|c.history_status(Some(&uid.to_string()),&cookie,now).0=="AVAILABLE"&&c.identity_is_current(uid,&cookie,now)) { return Ok(()); }
+        if self.web_context.lock().unwrap().as_ref().is_some_and(|c| {
+            c.history_status(Some(&uid.to_string()),&cookie,now).0=="AVAILABLE"
+                && c.identity_acquired_at.is_some_and(|at| now.checked_sub(at).is_some_and(|age| age <= 300))
+        }) { return Ok(()); }
         let biz_trace_id = format!("{:08x}", rand::random::<u32>());
         let ms_token = self.extract_cookie_val("msToken").unwrap_or_else(|| {
             use rand::Rng;
@@ -326,14 +329,7 @@ impl DouyinClient {
         let old_ctx = self.web_context.lock().unwrap().clone();
         let mut context=super::im_auth::WebSessionContext::from_session(uid,&cookie,DEFAULT_USER_AGENT)?.with_identity(&response)?;
         if let Some(old) = old_ctx {
-            if old.session_hash == context.session_hash {
-                context.guard_secret_hex = old.guard_secret_hex;
-                context.guard_server_data = old.guard_server_data;
-                context.guard_acquired_at = old.guard_acquired_at;
-                context.last_beat_at = old.last_beat_at;
-                context.dtrait_pk1_pem = old.dtrait_pk1_pem;
-                context.dtrait_version = old.dtrait_version;
-            }
+            context.inherit_guard_materials(&old);
         }
         anyhow::ensure!(matches!(self.check_cookie().await,CheckCookieResult::Valid(_)),"IM 身份凭证获取后登录态未确认，未保存凭证");
         self.verified_sender_uid(Some(&uid.to_string()))?;

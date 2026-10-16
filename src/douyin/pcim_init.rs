@@ -332,7 +332,13 @@ impl DouyinClient {
                 anyhow::ensure!(!binding.has_day_claim(beijing_day()).await?, "PCIM_INIT_DAY_ALREADY_CLAIMED");
             }
             stage = "TICKET";
-            let ticket = self.acquire_conversation_ticket_for(&binding.uid.to_string(),&binding.cid,binding.kind).await?;
+            let ticket = match self.acquire_conversation_ticket_for(&binding.uid.to_string(),&binding.cid,binding.kind).await {
+                Ok(t) => t,
+                Err(e) => {
+                    tracing::error!(account_id=%binding.account_id, cid=%binding.cid, err=%format!("{:#}", e), "获取会话票据失败");
+                    return Err(e);
+                }
+            };
             let day = beijing_day();
             let already_sent = ticket.pcim_initial_history_precheck(self).await?;
             if !binding.force {
