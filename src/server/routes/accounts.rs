@@ -85,7 +85,7 @@ pub async fn create_account(
     if !cleaned_cookie.contains("sessionid=") && !cleaned_cookie.contains("sessionid_ss=") && !cleaned_cookie.contains("sid_tt=") {
         return Err((StatusCode::BAD_REQUEST, Json(json!({
             "code": 400,
-            "message": "添加失败：Cookie 中缺少关键凭证 sessionid！由于浏览器 HttpOnly 安全限制，通过控制台 document.cookie 无法获取此凭证。请在 Network(网络) 标签页右键任意请求「复制为 cURL」后直接粘贴进来！"
+            "message": "添加失败：Cookie 中缺少关键凭证 sessionid！推荐在已登录抖音页面使用 SparkLight 油猴脚本(v2.2.0)点击「⚡ 复制 SparkLight 全量凭证」后直接粘贴导入。"
         }))));
     }
 
@@ -248,7 +248,7 @@ pub async fn update_account(
             if !cleaned_cookie.contains("sessionid=") && !cleaned_cookie.contains("sessionid_ss=") && !cleaned_cookie.contains("sid_tt=") {
                 return Err((StatusCode::BAD_REQUEST, Json(json!({
                     "code": 400,
-                    "message": "更新失败：Cookie 中缺少关键凭证 sessionid！由于浏览器 HttpOnly 安全限制，请在 Network 面板右键任意请求「复制为 cURL」后粘贴。"
+                    "message": "更新失败：Cookie 中缺少关键凭证 sessionid！推荐在已登录抖音页面使用 SparkLight 油猴脚本(v2.2.0)点击「⚡ 复制 SparkLight 全量凭证」后直接粘贴导入。"
                 }))));
             }
             let cleaned_cookie = validate_account_cookie(&state,&existing,&cleaned_cookie).await?;

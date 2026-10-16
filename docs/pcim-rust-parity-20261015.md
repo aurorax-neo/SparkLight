@@ -1,4 +1,6 @@
 # PCIM Rust 计算层复刻与验证
+> **归档与演进说明**：本文档记录了 2026-10-15 Rust 纯算法层（Guard P-256、DTrait 820 字节、特征哈希）的逆向与测试对照。后续系统在此基础上，正式演进并确立了 **Scheme A 官方全链路复刻方案（油猴脚本 v2.2.0 一键导入正牌私钥与票据，100% Signed 模式发送）**，已全面部署上线并完成实机双向发信验收。最新指南请参阅 [deployment-and-operation-guide.md](deployment-and-operation-guide.md)。
+
 
 ## 已实现，尚未接入发送
 

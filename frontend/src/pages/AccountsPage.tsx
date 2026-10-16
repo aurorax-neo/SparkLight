@@ -16,7 +16,6 @@ import {
   Link2,
   Terminal,
   Copy,
-  Check,
 } from 'lucide-react';
 import { api } from '../api/client';
 import { AccountDto, DouyinFriend } from '../types';
@@ -56,12 +55,8 @@ export const AccountsPage: React.FC<Props> = ({ active = true, refreshTrigger, o
   const [quickSyncCookie, setQuickSyncCookie] = useState('');
   const [isQuickSyncing, setIsQuickSyncing] = useState(false);
 
-  // Console Injector script modal state
+  // Tampermonkey extractor modal state
   const [isConsoleModalOpen, setIsConsoleModalOpen] = useState(false);
-  const [consoleModalAccount, setConsoleModalAccount] = useState<AccountDto | null>(null);
-  const [consoleTargetAccountId, setConsoleTargetAccountId] = useState('');
-  const [syncGuideTab, setSyncGuideTab] = useState<'tampermonkey' | 'cli'>('tampermonkey');
-  const [isCliCopied, setIsCliCopied] = useState(false);
 
   // Custom Confirm Dialog States
   const [deleteAccountTarget, setDeleteAccountTarget] = useState<AccountDto | null>(null);
@@ -131,7 +126,7 @@ export const AccountsPage: React.FC<Props> = ({ active = true, refreshTrigger, o
       return;
     }
     if (!hasSessionId(finalCookie)) {
-      setFormError('Cookie 中缺少关键凭证 sessionid！由于浏览器 HttpOnly 安全机制，无法直接通过 document.cookie 获取。请在 Network(网络) 面板右键任意请求「复制为 cURL」后直接粘贴进来！');
+      setFormError('Cookie 中缺少关键凭证 sessionid！推荐在已登录抖音页面使用 SparkLight 油猴脚本(v2.2.0)点击「⚡ 复制 SparkLight 全量凭证」后直接粘贴导入。');
       return;
     }
     setIsSubmitting(true);
@@ -219,20 +214,6 @@ export const AccountsPage: React.FC<Props> = ({ active = true, refreshTrigger, o
   };
 
 
-  const getCliCommand = (targetAccId?: string) => {
-    const accArg = targetAccId ? ` --account-id ${targetAccId}` : '';
-    return `python3 tools/sync_douyin_cookie.py --server ${window.location.origin} --api-key ${api.getApiKey()}${accArg}`;
-  };
-
-  const handleCopyCliCommand = async (targetId?: string) => {
-    const cmd = getCliCommand(targetId);
-    const ok = await copyToClipboard(cmd);
-    if (ok) {
-      setIsCliCopied(true);
-      toast.success('自动化同步命令已成功复制！');
-      setTimeout(() => setIsCliCopied(false), 3000);
-    }
-  };
 
 
   const handleRunAccountConfirm = async () => {
@@ -358,12 +339,7 @@ export const AccountsPage: React.FC<Props> = ({ active = true, refreshTrigger, o
         </div>
         <div className="flex items-center gap-2">
           <button
-            onClick={() => {
-              const defaultAcc = accounts[0] || null;
-              setConsoleModalAccount(defaultAcc);
-              setConsoleTargetAccountId(defaultAcc ? defaultAcc.id : '');
-              setIsConsoleModalOpen(true);
-            }}
+            onClick={() => setIsConsoleModalOpen(true)}
             className="flex items-center gap-1.5 px-3.5 py-2 text-xs font-medium rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800 transition"
           >
             <Terminal className="w-4 h-4 text-orange-500" />
@@ -460,13 +436,9 @@ export const AccountsPage: React.FC<Props> = ({ active = true, refreshTrigger, o
                     <div className="flex items-center gap-1 shrink-0">
                       {/* Browser DevTools Console Injector Modal */}
                       <button
-                        onClick={() => {
-                          setConsoleModalAccount(acc);
-                          setConsoleTargetAccountId(acc.id);
-                          setIsConsoleModalOpen(true);
-                        }}
-                        className="p-1.5 text-blue-500 hover:text-blue-600 rounded-lg hover:bg-blue-50 dark:hover:bg-blue-950/30 transition"
-                        title="控制台一键提取与同步"
+                        onClick={() => setIsConsoleModalOpen(true)}
+                        className="p-1.5 text-orange-500 hover:text-orange-600 rounded-lg hover:bg-orange-50 dark:hover:bg-orange-950/30 transition"
+                        title="油猴脚本一键提取全量凭证指南"
                       >
                         <Terminal className="w-3.5 h-3.5" />
                       </button>
@@ -615,7 +587,7 @@ export const AccountsPage: React.FC<Props> = ({ active = true, refreshTrigger, o
                   rows={4}
                   value={cookie}
                   onChange={(e) => setCookie(cleanCookieText(e.target.value))}
-                  placeholder="直接粘贴油猴脚本一键复制的凭证对象，或粘贴 Cookie / cURL 命令"
+                  placeholder="直接粘贴油猴脚本一键复制的凭证对象（sparklight_credential JSON）"
                   className="w-full px-3 py-2 text-xs font-mono rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-100 focus:ring-2 focus:ring-orange-500 focus:outline-none"
                 />
                 {cookie.trim() && !hasSessionId(cookie) && (
@@ -625,8 +597,7 @@ export const AccountsPage: React.FC<Props> = ({ active = true, refreshTrigger, o
                       <span>未检测到关键凭证 sessionid</span>
                     </p>
                     <p className="text-[11px] leading-relaxed text-slate-600 dark:text-slate-400">
-                      因浏览器 <strong>HttpOnly</strong> 安全机制，直接通过控制台 <code>document.cookie</code> 获取的内容无法包含 <code>sessionid</code>。<br/>
-                      <strong>极速解决</strong>：在已登录抖音页面按 F12 ➔ Network (网络) 标签页 ➔ 刷新或点任一私信 ➔ 右键任意请求 ➔ <strong>复制为 cURL</strong> ➔ 直接粘贴到此处，系统将秒级自动提取！
+                      未检测到关键凭证 sessionid！推荐在已登录抖音页面使用 SparkLight 油猴脚本(v2.2.0)点击「⚡ 复制 SparkLight 全量凭证」胶囊按钮，然后直接粘贴导入即可（包含完整 Cookie 与 Guard P-256 私钥和票据）。
                     </p>
                   </div>
                 )}
@@ -704,7 +675,7 @@ export const AccountsPage: React.FC<Props> = ({ active = true, refreshTrigger, o
                   rows={4}
                   value={quickSyncCookie}
                   onChange={(e) => setQuickSyncCookie(cleanCookieText(e.target.value))}
-                  placeholder="直接粘贴油猴脚本一键复制的凭证对象，或粘贴 Cookie / cURL 命令"
+                  placeholder="直接粘贴油猴脚本一键复制的凭证对象（sparklight_credential JSON）"
                   className="w-full px-3 py-2 text-xs font-mono rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-100 focus:ring-2 focus:ring-orange-500 focus:outline-none"
                 />
                 {quickSyncCookie.trim() && !hasSessionId(quickSyncCookie) && (
@@ -714,7 +685,7 @@ export const AccountsPage: React.FC<Props> = ({ active = true, refreshTrigger, o
                       <span>未检测到 sessionid 凭证</span>
                     </p>
                     <p className="text-[11px] text-slate-600 dark:text-slate-400">
-                      请在已登录页面 Network (网络) 面板右键任意请求 ➔ <strong>复制为 cURL</strong> ➔ 直接粘贴进来即可！
+                      未检测到关键凭证 sessionid！推荐在已登录抖音页面使用 SparkLight 油猴脚本(v2.2.0)点击「⚡ 复制 SparkLight 全量凭证」后直接粘贴进来即可。
                     </p>
                   </div>
                 )}
@@ -783,7 +754,7 @@ export const AccountsPage: React.FC<Props> = ({ active = true, refreshTrigger, o
                   rows={3}
                   value={cookie}
                   onChange={(e) => setCookie(cleanCookieText(e.target.value))}
-                  placeholder="可直接粘贴油猴脚本复制的全量凭证对象，或纯 Cookie"
+                  placeholder="直接粘贴油猴脚本一键复制的凭证对象（sparklight_credential JSON）"
                   className="w-full px-3 py-2 text-xs font-mono rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-100 focus:ring-2 focus:ring-orange-500 focus:outline-none"
                 />
                 {cookie.trim() && !hasSessionId(cookie) && (
@@ -793,7 +764,7 @@ export const AccountsPage: React.FC<Props> = ({ active = true, refreshTrigger, o
                       <span>未检测到 sessionid 凭证</span>
                     </p>
                     <p className="text-[11px] text-slate-600 dark:text-slate-400">
-                      请在已登录页面 Network (网络) 面板右键任意请求 ➔ <strong>复制为 cURL</strong> ➔ 直接粘贴进来即可！
+                      未检测到关键凭证 sessionid！推荐在已登录抖音页面使用 SparkLight 油猴脚本(v2.2.0)点击「⚡ 复制 SparkLight 全量凭证」后直接粘贴进来即可。
                     </p>
                   </div>
                 )}
@@ -980,128 +951,44 @@ export const AccountsPage: React.FC<Props> = ({ active = true, refreshTrigger, o
               </div>
               <div>
                 <h3 className="text-base font-bold text-slate-900 dark:text-slate-100 flex items-center gap-2">
-                  全自动 Cookie 凭证同步助手
+                  全自动凭证提取助手 (油猴脚本 v2.2.0)
                 </h3>
                 <p className="text-xs text-slate-500 dark:text-slate-400">
-                  突破手动复制 cURL 瓶颈 · 提供浏览器扩展一键同步、本机助手及控制台脚本
+                  官方 Guard P-256 私钥与 Cookie 凭证全自动提取 · 支持 Tampermonkey / ScriptCat 一键复制导入
                 </p>
               </div>
             </div>
 
-            {/* Method Tabs */}
-            <div className="flex items-center gap-1.5 mb-4 p-1 rounded-xl bg-slate-100 dark:bg-slate-800/80 border border-slate-200/60 dark:border-slate-700/60">
-              <button
-                type="button"
-                onClick={() => setSyncGuideTab('tampermonkey')}
-                className={`flex-1 py-1.5 px-3 rounded-lg text-xs font-semibold transition ${
-                  syncGuideTab === 'tampermonkey'
-                    ? 'bg-white dark:bg-slate-900 text-orange-600 dark:text-orange-400 shadow-sm'
-                    : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200'
-                }`}
-              >
-                🐵 油猴全自动脚本 (强烈推荐 · 100% 免抓包与风控)
-              </button>
-              <button
-                type="button"
-                onClick={() => setSyncGuideTab('cli')}
-                className={`py-1.5 px-4 rounded-lg text-xs font-semibold transition ${
-                  syncGuideTab === 'cli'
-                    ? 'bg-white dark:bg-slate-900 text-orange-600 dark:text-orange-400 shadow-sm'
-                    : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200'
-                }`}
-              >
-                ⚡ 本机 Python 助手
-              </button>
+            <div className="space-y-3.5 mb-4 text-xs">
+              <div className="p-3.5 rounded-xl bg-orange-50/70 dark:bg-orange-950/20 border border-orange-200/80 dark:border-orange-900/40">
+                <div className="font-bold text-orange-700 dark:text-orange-300 flex items-center justify-between mb-1.5">
+                  <span>⚡ 一键提取全量凭证（含 HttpOnly 与 Guard 签名私钥/票据）</span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      copyToClipboard(TAMPERMONKEY_SCRIPT);
+                      toast.success('油猴脚本代码已复制到剪贴板！');
+                    }}
+                    className="flex items-center gap-1 px-2.5 py-1 text-xs font-semibold rounded-lg bg-orange-500 hover:bg-orange-600 text-white shadow-sm active:scale-95 transition"
+                  >
+                    <Copy className="w-3 h-3" />
+                    <span>复制油猴脚本代码</span>
+                  </button>
+                </div>
+                <p className="text-[11px] text-slate-600 dark:text-slate-400 leading-relaxed">
+                  通过 Tampermonkey (油猴) 或 ScriptCat 扩展，在已登录的抖音页面右下角自动生成浮动胶囊按钮。点击即可秒级全自动抓取完整 Cookie 与官方 Guard 签名私钥，<strong>100% 纯本地复制，零抓包、零上传、免除风控掉线</strong>！
+                </p>
+              </div>
+
+              <div className="p-3.5 rounded-xl bg-slate-50 dark:bg-slate-800/40 border border-slate-200/60 dark:border-slate-800 space-y-2.5">
+                <div className="font-bold text-slate-800 dark:text-slate-200 text-xs">3 步极简使用流程:</div>
+                <ol className="list-decimal list-inside space-y-1.5 text-[11px] text-slate-600 dark:text-slate-400">
+                  <li>在浏览器安装 <strong>Tampermonkey (油猴)</strong> 或 <strong>ScriptCat (脚本猫)</strong> 扩展程序；</li>
+                  <li>在扩展中新建脚本，将上方<strong>「油猴脚本代码」</strong>粘贴并保存；</li>
+                  <li>打开或刷新已登录的抖音页面 (<code>douyin.com</code>)，点击页面右下角出现的<strong>「⚡ 复制 SparkLight 全量凭证」</strong>胶囊按钮，返回本系统直接粘贴即可！</li>
+                </ol>
+              </div>
             </div>
-
-            {/* Target Account Selector */}
-            {accounts.length > 0 && (
-              <div className="mb-4 p-3 rounded-xl bg-slate-50 dark:bg-slate-800/40 border border-slate-200/80 dark:border-slate-800 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
-                <span className="text-xs font-medium text-slate-700 dark:text-slate-300">
-                  同步绑定目标账号:
-                </span>
-                <div className="flex flex-wrap gap-1.5">
-                  {accounts.map((acc) => {
-                    const isSelected = (consoleTargetAccountId || consoleModalAccount?.id) === acc.id;
-                    return (
-                      <button
-                        key={acc.id}
-                        type="button"
-                        onClick={() => {
-                          setConsoleTargetAccountId(acc.id);
-                          setConsoleModalAccount(acc);
-                        }}
-                        className={`px-2.5 py-1 text-xs rounded-lg font-medium transition ${
-                          isSelected
-                            ? 'bg-orange-500 text-white shadow-sm'
-                            : 'bg-white dark:bg-slate-800 text-slate-600 dark:text-slate-300 border border-slate-200 dark:border-slate-700 hover:bg-slate-100'
-                        }`}
-                      >
-                        {accountDisplayName(acc.nickname, acc.alias)}
-                      </button>
-                    );
-                  })}
-                </div>
-              </div>
-            )}
-
-            {syncGuideTab === 'tampermonkey' && (
-              <div className="space-y-3.5 mb-4 text-xs">
-                <div className="p-3.5 rounded-xl bg-orange-50/70 dark:bg-orange-950/20 border border-orange-200/80 dark:border-orange-900/40">
-                  <div className="font-bold text-orange-700 dark:text-orange-300 flex items-center justify-between mb-1.5">
-                    <span>⚡ 一键提取全量凭证（含 HttpOnly 与 Guard 签名私钥/票据）</span>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        copyToClipboard(TAMPERMONKEY_SCRIPT);
-                        toast.success('油猴脚本代码已复制到剪贴板！');
-                      }}
-                      className="flex items-center gap-1 px-2.5 py-1 text-xs font-semibold rounded-lg bg-orange-500 hover:bg-orange-600 text-white shadow-sm active:scale-95 transition"
-                    >
-                      <Copy className="w-3 h-3" />
-                      <span>复制油猴脚本代码</span>
-                    </button>
-                  </div>
-                  <p className="text-[11px] text-slate-600 dark:text-slate-400 leading-relaxed">
-                    通过 Tampermonkey (油猴) 扩展，在已登录的抖音页面右下角自动生成浮动胶囊按钮。点击即可秒级全自动抓取完整 Cookie 与官方 Guard 签名私钥，<strong>100% 纯本地复制，零抓包、零上传、免除风控掉线</strong>！
-                  </p>
-                </div>
-
-                <div className="p-3.5 rounded-xl bg-slate-50 dark:bg-slate-800/40 border border-slate-200/60 dark:border-slate-800 space-y-2.5">
-                  <div className="font-bold text-slate-800 dark:text-slate-200 text-xs">3 步极简使用流程:</div>
-                  <ol className="list-decimal list-inside space-y-1.5 text-[11px] text-slate-600 dark:text-slate-400">
-                    <li>在浏览器安装 <strong>Tampermonkey</strong> 或 <strong>ScriptCat</strong> 扩展程序；</li>
-                    <li>在扩展中新建脚本，将上方<strong>「油猴脚本代码」</strong>粘贴并保存；</li>
-                    <li>打开或刷新已登录的抖音页面 (<code>douyin.com</code>)，点击页面右下角出现的<strong>「⚡ 复制 SparkLight 全量凭证」</strong>胶囊按钮，返回本系统直接粘贴即可！</li>
-                  </ol>
-                </div>
-              </div>
-            )}
-
-            {syncGuideTab === 'cli' && (
-              <div className="space-y-3 mb-4 text-xs">
-                <div className="p-3.5 rounded-xl bg-slate-50 dark:bg-slate-800/40 border border-slate-200/60 dark:border-slate-800">
-                  <div className="font-bold text-slate-800 dark:text-slate-200 mb-1">
-                    在本地终端运行单行命令提取并同步：
-                  </div>
-                  <p className="text-[11px] text-slate-500 mb-3">
-                    直接读取本机浏览器已登录的 Cookies 数据库并在内存中安全解密上报，全程不打印任何凭据：
-                  </p>
-                  <div className="flex items-center justify-between gap-2 p-2 rounded-lg bg-slate-950 font-mono text-[11px] text-slate-200">
-                    <span className="truncate">{getCliCommand(consoleTargetAccountId || consoleModalAccount?.id)}</span>
-                    <button
-                      type="button"
-                      onClick={() => handleCopyCliCommand(consoleTargetAccountId || consoleModalAccount?.id)}
-                      className="flex items-center gap-1 px-2.5 py-1 text-xs font-semibold rounded bg-orange-500 hover:bg-orange-600 text-white shrink-0 active:scale-95 transition"
-                    >
-                      {isCliCopied ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />}
-                      <span>{isCliCopied ? '已复制' : '复制命令'}</span>
-                    </button>
-                  </div>
-                </div>
-              </div>
-            )}
-
             </div>
           </div>
         </ModalPortal>

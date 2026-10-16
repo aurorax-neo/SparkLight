@@ -142,7 +142,7 @@
     const cookieMap = await fetchAllCookies();
     let hasSession = !!(cookieMap['sessionid'] || cookieMap['sessionid_ss'] || cookieMap['sid_tt']);
 
-    // 如果因扩展安全限制未能拿到 sessionid，尝试读取剪贴板是否已有刚复制的 cURL
+    // 兜底：如果扩展限制未直接获取 sessionid，尝试检查剪贴板是否已有纯文本凭证
     if (!hasSession && navigator.clipboard && navigator.clipboard.readText) {
       try {
         const clip = await navigator.clipboard.readText();
@@ -210,7 +210,7 @@
     }
 
     if (!hasSession) {
-      showToast('⚠️ 未能读取 HttpOnly 凭证(sessionid)！请在油猴扩展设置中开启 Cookie 访问权限，或在 Network 面板复制任一请求为 cURL 后再次点击', false, 6000);
+      showToast('⚠️ 未能读取 HttpOnly 凭证(sessionid)！请在油猴/ScriptCat扩展设置中开启 Cookie 访问权限，然后刷新抖音页面重试', false, 6000);
       return false;
     }
 

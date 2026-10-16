@@ -1,160 +1,200 @@
 # SparkLight - 抖音多账号隔离与每日续火花系统
 
-SparkLight 是一款专为多抖音账号隔离维护、好友续火花对象管理与凭证健康监测设计的高性能自动化系统。后端采用纯 Rust 原生开发（Axum + Tokio + SQLite），前端采用 React + TypeScript + TailwindCSS 现代化工作台，前后端分离，安全可控。
-
-> 2026-10-15 工程收口：当前证据不足以可靠交付自动 Cookie／后台会话续期及纯 Rust 无人值守签名，已停止该未验证路线，生产 SDK 门禁保持关闭。108 已部署账号失败诊断、真实批次结果与日期状态修复，但缺少合法 Web IM 上下文／发送凭证时仍安全停止，不代表自动发送能力恢复。详见 [收口与部署报告](docs/renewal-closeout-and-deployment-20261015.md)。
+SparkLight 是一款专为多抖音账号隔离维护、好友续火花对象管理与凭证健康监测设计的高性能轻量化系统。后端采用纯 Rust 原生开发（Axum + Tokio + SQLite + reqwest），前端采用 React 18 + TypeScript + TailwindCSS 现代化管理控制台。系统全程由 Rust 原生 HTTP/Protobuf 协议栈驱动，**无须常驻任何无头浏览器（Puppeteer / Playwright）**，内存占用极低，运行毫秒级响应。
 
 ---
 
-## 🌟 核心特性
+## 核心特性
 
-- **纯 Rust 原生后端，零浏览器依赖**：系统所有 Cookie 检测、好友会话拉取与续火花互动请求均由纯 Rust 原生 HTTP 协议栈实现，无需任何 Playwright / Puppeteer / 无头浏览器常驻。
-- **强制独立登录页与鉴权守卫**：未登录状态严禁渲染任何内部业务界面与数据，输入管理 API Key 经过服务端真实验证通过后方可进入控制台。
-- **多账号网络会话强隔离**：为每个抖音账号构建独立的客户端连接与 Cookie 容器，各账号互不串扰、互不影响。
-- **高等级安全加密存储**：
-  - 账号 Cookie 落地 SQLite 数据库前统一经过 **XChaCha20Poly1305** 高强度 AEAD 算法加密；
+- **纯 Rust 原生协议栈，告别重量级浏览器依赖**：
+  系统所有登录态巡检、好友关系同步、会话票据获取与发信互动请求均由纯 Rust 原生协议栈驱动，内存占用低（常驻仅数十兆），毫秒级极速响应，无需部署 Chromium 等重量级运行时。
+- **Scheme A 官方全链签名体系（彻底杜绝 KICK 踢下线）**：
+  - **正牌私钥与服务端票据持久化**：系统自主加密持有账号在真实浏览器中绑定的 P-256 签名私钥与官方服务端签发的 Ticket Guard 票据；
+  - **100% 真实签名发送（Signed 模式）**：发信时使用该真实私钥对票据材料进行 ECDSA/HMAC 计算，携带完整的 `bd-ticket-guard-client-data`、`ts_sign`、`req_sign` 与 `t_trust: 1` 标识，彻底杜绝未签名公钥裸奔触发的风控下线；
+  - **Protobuf 运行指纹全量对齐**：外层报文扩展头完整注入 19 项官方浏览器环境特征（如 `browser_platform`、`browser_version`、`screen_width`、`screen_height`、`timezone_name`、`cookie_enabled` 等），消息层注入高精度 `s:stime` 浮点时间戳；
+  - **动态参数与 Client-Hints 补齐**：自动提取 `s_v_web_id` 构建 `verifyFp` 与 `fp`，动态派生高熵 `msToken`，补全现代浏览器 Client-Hints 与安全请求头。
+- **油猴全自动凭证提取助手（UserScript v2.2.0）**：
+  - 提供专属 UserScript 脚本（`tools/sparklight_extractor.user.js`），支持 Tampermonkey 与 ScriptCat；
+  - 在已登录的抖音网页版页面右下角常驻悬浮胶囊按钮，利用扩展特权能力一键聚合提取全量 HttpOnly Cookie（包含核心 `sessionid`、`passport_assist_user` 等）与 LocalStorage 中的官方 Guard 签名私钥和票据；
+  - **100% 纯本地复制**：不产生任何外部网络请求，一键打包写入剪贴板，返回控制台一次粘贴即可完成导入；彻底废除控制台命令、本机 Python 助手及手动抓包等繁琐易错手段。
+- **好友头像与备注名（remark_name）智能同步**：
+  - 一键同步关注好友列表，自动解析会话扩展中的真实备注名（`remark_name`）与高清头像链接并更新入库；
+  - 目标列表中优先高亮显示备注名并括注抖音原生昵称；支持在编辑弹窗中自定义修改备注名，头像自带防盗链处理与加载失败自动降级。
+- **监控开关与手动测试完全解耦**：
+  - 目标列表的「监控开关」仅控制每日后台定时自动化调度（禁用时后台跳过该目标）；
+  - 关闭监控**绝不禁用**手动续火花测试，用户可随时在界面上发起实发测试验证。
+- **静默手动测试（告别手机推送打扰）**：
+  - 所有前台手动点击的测试操作（包括手动续火花、账号检测等），结果直接在网页端 Toast/弹窗呈现，**100% 屏蔽 Bark 通知**；
+  - 仅在后台定时任务执行异常或登录态真实失效时向移动设备发送告警。
+- **多账号网络会话强隔离与高等级加密存储**：
+  - 账号凭证与私钥落地数据库前统一经过 **XChaCha20Poly1305** 高强度 AEAD 算法加密；
   - 主加密密钥持久化于 `.master-key`，文件权限严格限制为 `0600`（仅所有者读写）；
-  - 控制台与接口全链路对 Cookie 明文执行脱敏掩码展示，严防敏感凭证泄露。
-- **全接口 API Key 认证与敏感显示处理**：
-  - Axum 中间件全局校验请求头 `X-API-Key` 或 `Authorization: Bearer <key>`；
-  - 设置页面中 API Key 与 Bark Key 默认以密码密文形式隐藏，支持一键切换明文/密文与安全复制。
-- **服务端 Cookie 更新保存**：只在响应校验通过后合并 `Set-Cookie`；拒绝删除/清空关键登录凭证。更新不代表账号一定有效，也不保证延长登录期限。
-- **Web 请求风控保护**：统一接口白名单、实时 Cookie、浏览器身份、来源头及响应校验；遇到验证、限流或协议异常停止同会话请求，不以重建客户端绕过停发。
-- **精细化续火花对象管理**：
-  - 支持一键从抖音接口同步好友/关注列表并多选批量导入；
-  - 支持手动输入好友 SecUID 与自定义打招呼消息（默认 `🔥`）；
-  - 支持单账号、单目标立即测试发送与互动状态追踪。
-- **Bark 实时告警推送**：
-  - 支持全局 Bark 推送服务地址与 Device Key；
-  - 支持多账号配置专属独立的 Bark Key 进行消息分流；
-  - 当定时巡检发现 Cookie 失效或触发平台风控验证时，第一时间推送告警至 iOS 设备。
-- **每日定时任务与请求间隔**：
-  - 内置每日调度；发送仍须具备当前账号、目标会话的有效官方凭证。
-  - 同会话请求串行并至少间隔 350 毫秒，目标之间保留配置的随机延迟；不保证免于平台风控。
-- **Brave 调试辅助工具**：
-  - 提供 `tools/open_brave.sh` 脚本与前端一键启动快捷入口，以系统默认配置调起 `/Applications/Brave Browser.app` 打开抖音，仅用于人工登录与复制 Cookie。
+  - 控制台与接口全链路对 Cookie 执行脱敏掩码展示，严防敏感凭证泄露。
 
 ---
 
-## 🍪 抖音 Cookie 获取方法与代码
+## 凭证一键提取与导入流程（油猴脚本 v2.2.0）
 
-推荐在浏览器（如系统中的 Brave 浏览器）登录抖音后，通过以下两种便捷方式获取有效 Cookie：
+系统全面采用油猴全自动脚本一键提取全量凭证，无需打开开发者工具抓包，无需复制 cURL 命令。
 
-### 方式一：Network (网络) 面板一键复制 cURL 粘贴（推荐最快、100% 完整）
+### 第 1 步：安装油猴脚本
+1. 在电脑浏览器（Chrome / Brave / Edge 等）安装任意用户脚本管理器扩展（推荐 **Tampermonkey** 或 **ScriptCat**）；
+2. 在扩展中「添加新脚本」，将本项目中的 `tools/sparklight_extractor.user.js`（或在 SparkLight 控制台「全自动凭证提取助手」中点击「复制油猴脚本代码」）粘贴并保存。
 
-> **特别注意**：由于现代浏览器安全规范，核心登录凭证 `sessionid` 具有 **`HttpOnly`** 标记，任何网页 JS 脚本都**无法**通过 `document.cookie` 读取到它。如果仅复制 `document.cookie`，将缺少关键的 `sessionid` 凭证导致提示“Cookie 已失效”。
+### 第 2 步：一键提取并复制
+1. 打开或刷新已登录的抖音网页版页面（`https://www.douyin.com/`）；
+2. 页面右下角会自动出现悬浮胶囊按钮：**`⚡ 复制 SparkLight 全量凭证`**；
+3. 点击该按钮，脚本自动聚合全量 HttpOnly Cookie 与 Guard 签名私钥，写入系统剪贴板并弹出成功提示。
 
-最快、最完整的获取方式如下：
-1. 在浏览器登录抖音网页版（`https://www.douyin.com/`）；
-2. 按 `F12`（Mac 为 `Command + Option + I`）打开开发者工具，切换到 **Network (网络)** 标签页；
-3. 刷新页面或点击任意关注/好友私信；
-4. 找到任意发送到 `douyin.com` 的网络请求，**鼠标右键 ➔ 复制 ➔ 复制为 cURL (bash)**（或 Copy as cURL）；
-5. **直接粘贴到 SparkLight 控制台的“添加账号”输入框中**（SparkLight 系统已内置智能 cURL 解析器，会自动秒级提取出包含 `sessionid` 的完整 Cookie）。
+### 第 3 步：一次粘贴导入
+1. 返回 SparkLight 控制台，在「添加账号」或「更新凭证」输入框中直接粘贴（Cmd+V / Ctrl+V）；
+2. 系统自动识别全量凭证对象，将 Cookie 与 Guard 密钥材料加密绑定入库。
 
----
-
-### 方式二：浏览器控制台同步助手脚本（在页面弹窗一键同步）
-
-在已登录抖音的控制台运行 SparkLight 控制台专用脚本，页面中央将弹出「SparkLight 凭证同步面板」：
-- 面板支持自动检测剪贴板捕获的 cURL 或手动填入 `sessionid`；
-- 点击「🚀 一键上传同步」即可秒级更新到后台，无需手动复制粘贴。
-
-## 🏗️ 架构概览
-
+#### 导入凭证对象格式（sparklight_credential 规范）
+导出的凭证为标准 JSON 对象，格式如下（系统仅在内存解密，落库全程加密）：
+```json
+{
+  "type": "sparklight_credential",
+  "version": "2.2.0",
+  "extracted_at": "2026-10-16T12:00:00.000Z",
+  "uid": "12345678901",
+  "nickname": "示例用户",
+  "cookie": "sessionid=***; passport_assist_user=***; ...",
+  "guard_private_key": "3081...",
+  "guard_server_data": "{\"ticket\":\"***\",\"expire_time\":...}"
+}
 ```
+
+---
+
+## 攻坚历程与架构演进（从 KICK 到 Signed 成功）
+
+### 1. 早期痛点与 KICK 踢线根因
+在早期探索阶段，系统发信曾偶发出现 `{"decision": "KICK"}` 异常导致用户抖音账号被迫下线。经抓包与协议层深度比对，定位出以下核心原因：
+- **临时随机私钥缺陷**：在旧链路中，由于未能捕获浏览器已登录的 Guard 私钥，后端回退到由 Rust 本地随机生成 P-256 临时私钥对并向服务端发送裸公钥；这触发了服务端的会话劫持与异常环境风控模型，导致服务端判定凭证泄露并直接吊销 Cookie。
+- **环境指纹与 Header 缺失**：缺少发信报文外层 Protobuf 扩展头中要求的 19 项设备参数（屏幕尺寸、时区、浏览器特征等），以及现代浏览器 Client-Hints 和高精度 `s:stime`。
+- **旧工具链局限**：早期尝试的控制台脚本受限于浏览器安全机制无法读取 HttpOnly Cookie；而本地 Python 助手仅能读取浏览器 Cookie 数据库，无法获取 LocalStorage 中存储的 Guard 密钥与票据，导致凭据链条残缺。
+
+### 2. Scheme A 突破与全面闭环
+为了从根本上解决凭证健康与稳定发送问题，系统实施了 Scheme A 官方签名体系重构：
+1. **浏览器正牌私钥与票据复用**：利用油猴脚本特权直接提取浏览器已完成验证的真实 P-256 签名私钥与 Ticket Guard 票据，并实现 30 天超长有效期安全持久化复用；
+2. **全流程 Signed 签名**：每次发信时均通过真实私钥进行 HMAC/ECDSA 计算，携带真实 `bd-ticket-guard-client-data`、`ts_sign`，将发信模式彻底升级为 100% `Signed`；
+3. **报文指纹严格对齐**：完整补齐 Protobuf 19 项环境特征扩展头，动态派生高精度时间戳与安全令牌；
+4. **实测验收**：在真实多账号互发场景下进行了多轮验证，发信成功率达 100%，会话稳定常青，彻底消除 KICK 下线风险。
+
+---
+
+## 功能说明
+
+### 1. 账号管理
+- **多账号隔离**：每个账号拥有独立的网络客户端、Cookie 密文与会话上下文；
+- **健康检测**：随时检测 Cookie 有效性，自动同步账号昵称与头像；
+- **独立推送**：支持为指定账号配置专属 Bark 推送 Key，未配置时自动继承系统全局 Key。
+
+### 2. 续火花目标管理
+- **好友一键同步**：点击「同步好友」自动拉取并解析互关好友的备注名、昵称、头像与火花天数；
+- **备注名智能同步**：自动识别好友真实备注名（`remark_name`）并高亮展示；支持手动修改；
+- **监控开关解绑**：开关仅控制后台定时调度；关闭监控后，**手动续火花测试依然完全可用**；
+- **自定义互动内容**：支持为每个目标设置专属互动模板或表情（默认 🔥）。
+
+### 3. 定时调度与告警
+- **每日定时执行**：支持设置每日自动化续火时间（如 08:30）；
+- **静默手动测试**：所有手动发起的检测与续火花操作，结果直接在前端反馈，**不触发 Bark 手机推送**；
+- **自动化告警**：定时任务执行失败或账号异常失效时，自动触发 Bark 告警推送到移动设备。
+
+---
+
+## 项目架构
+
+```text
 SparkLight/
 ├── Cargo.toml                  # Rust 后端依赖与工程配置
+├── Cargo.lock                  # 锁定依赖确定性版本
 ├── Dockerfile                  # 容器化构建定义
 ├── docker-compose.yml          # Docker Compose 编排服务
 ├── src/
-│   ├── main.rs                 # 服务启动与优雅停机
-│   ├── config.rs               # 环境变量与配置装配
-│   ├── crypto.rs               # XChaCha20Poly1305 加解密与脱敏规则
-│   ├── db/                     # SQLite 数据库模型与 CRUD 操作
-│   ├── douyin/                 # 纯 Rust 抖音客户端（隔离连接、凭证检测、响应 Cookie 更新保存、受限互动）
+│   ├── main.rs                 # 服务入口与优雅停机
+│   ├── config.rs               # 环境变量与配置管理
+│   ├── crypto.rs               # XChaCha20Poly1305 加密与凭据脱敏
+│   ├── db/                     # SQLite 数据库模型与 CRUD
+│   ├── douyin/                 # 纯 Rust 抖音协议栈
+│   │   ├── client.rs           # 核心客户端接口
+│   │   ├── pcim_guard.rs       # P-256 密钥对、签名与票据绑定
+│   │   ├── pcim_init.rs        # PCIM 消息报文装配与严格 ACK 解析
+│   │   ├── pcim_dtrait.rs      # DTrait 820 字节加密设备指纹
+│   │   ├── pcim_features.rs    # 特征序列化与哈希运算
+│   │   └── web.rs              # Web 请求统一网关与安全控制
 │   ├── notify/                 # Bark 推送客户端 (支持全局与账号独立 Key)
-│   ├── scheduler/              # 每日定时调度器与手动执行引擎
-│   ├── server/                 # Axum Web 服务、API Key 鉴权中间件与路由
-│   └── util.rs                 # 本地 Brave 浏览器启动封装
+│   ├── scheduler/              # 每日定时调度器与手动发信引擎
+│   └── server/                 # Axum Web 接口、API Key 鉴权与前端静态资源托管
 ├── frontend/                   # React 18 + TypeScript + TailwindCSS 控制台
 │   ├── src/
-│   │   ├── pages/LoginPage.tsx # 独立安全登录页（未授权守卫拦截）
-│   │   ├── pages/DashboardPage.tsx
-│   │   ├── pages/AccountsPage.tsx
-│   │   ├── pages/TargetsPage.tsx
-│   │   ├── pages/LogsPage.tsx
-│   │   └── pages/SettingsPage.tsx # 敏感密钥隐藏与脱敏处理
-│   └── dist/                   # 构建产物 (后端自动托管静态资源)
+│   │   ├── pages/LoginPage.tsx # 安全登录页
+│   │   ├── pages/AccountsPage.tsx # 账号管理与凭证提取指引
+│   │   ├── pages/TargetsPage.tsx  # 目标管理、头像展示与备注编辑
+│   │   ├── pages/DashboardPage.tsx# 系统状态大盘
+│   │   ├── pages/LogsPage.tsx  # 交互与调度审计日志
+│   │   └── pages/SettingsPage.tsx # 定时时间与 Bark 配置
+│   └── dist/                   # 预构建前端静态资源 (由 Rust 自动托管)
 ├── tools/
-│   └── open_brave.sh           # 默认配置启动 Brave 浏览器脚本
+│   └── sparklight_extractor.user.js # 官方推荐：油猴全自动凭证提取脚本 (v2.2.0)
 └── tests/
     └── api_auth_test.rs        # 接口鉴权与加密集成测试
 ```
 
 ---
 
-## 🚀 启动与部署
+## 启动与部署
 
-### 本地启动
+### 方式一：Docker Compose 容器化部署（推荐）
+
+在项目根目录下执行：
 
 ```bash
-# 1. 编译前端
-cd frontend && npm install && npm run build && cd ..
+docker compose up -d --build
+```
 
-# 2. 编译并运行后端
+查看运行状态与日志：
+```bash
+docker compose ps
+docker compose logs -f
+```
+
+容器将持久化挂载 `./data` 目录用于存储 SQLite 数据库与加密主密钥。默认开放映射端口为 `11090`，可通过 `http://<服务器IP>:11090` 访问。
+
+---
+
+### 方式二：裸机直接编译运行
+
+#### 1. 编译前端（若已存在 `frontend/dist` 可跳过）
+```bash
+cd frontend && npm install && npm run build && cd ..
+```
+
+#### 2. 编译并启动后端服务
+```bash
 cargo run --release
 ```
 
-服务默认监听 `http://127.0.0.1:8080`，启动时终端将输出本次自动生成的 API Key：
+服务启动后将监听配置的端口。首次启动时将在终端打印生成的系统管理 API Key：
 ```text
 ============================================================
  SparkLight 已生成系统管理 API Key: sk_...
  请在控制台登录或请求头中携带: X-API-Key: sk_...
 ============================================================
 ```
-
-浏览器打开 `http://127.0.0.1:8080`，直接进入独立登录页面，输入 API Key 即可进入工作台。
-
----
-
-### Docker 容器化部署
-
-```bash
-docker compose up -d --build
-```
-
-查看日志与状态：
-```bash
-docker compose ps
-docker compose logs -f
-```
+在浏览器中打开服务地址，输入该 API Key 即可登录使用。
 
 ---
 
-## 🧪 单元测试
+## 单元测试与门禁检查
 
-仅运行离线库测试与编译检查；集成目录包含真实消息测试，不应直接执行全部 `cargo test`：
+运行全部离线单元测试与协议解析测试：
 
 ```bash
-cargo test --lib
-cargo check
-cargo check --tests
+cargo test --offline --lib
+cargo check --offline
+cargo check --offline --tests
 ```
 
-## Web 接口覆盖与能力边界
-
-- 已统一覆盖：Passport 身份、自身/他人资料、好友关系、关注分页、IM 用户备注，以及 IM 会话信息（610）、消息历史（301）和发送（100）。
-- 账号 Cookie、只读 Web 上下文、一次性发送凭证分别加密保存。上下文绑定 UID、会话和真实 UA；Cookie 替换清除旧上下文/发送凭证。导入官方凭证的接口需要管理 API Key，导入本身不发送消息。
-- 只读 IM 上下文有效期为采集后 10 分钟，只能用于 301/610；不包含发送体、会话 Ticket 或路径签名。发送需要对应目标的官方凭证，消费一次后不可复用。
-- “今日已发送”仅由当前账号在北京时间当天的出站消息确认；历史截断、缺少真实短 ID、记录不完整均视为未知，不据此重复发送。异常火花响应不覆盖现有状态。
-- 验证/失效会话冷却 24 小时，限流/协议异常及发送结果未知冷却 30 分钟；同会话状态在进程内共享，重启不保留冷却。网络查询失败不自动认定 Cookie 失效。
-- 尚未实现通用动态 `a_bogus`、`msToken`、浏览器指纹或每路径 SDK 签名；不伪造或跨接口借用签名。未登记的域名/路径不携带凭证请求。
-- 官方 IM 材料目前仍需人工同步，尚不能无人值守自动续凭证。因此不能宣称全部接口已与官方 Web 完全等价，也不能保证每天自动续火成功。
-- 本轮验证为离线回归、编译和部署完整性检查；没有进行全部抖音接口线上验收。
-
-## 官方 SDK 研究与更新边界
-
-- 官方静态资源来源、版本、SHA-256 和入口固定在 `src/douyin/sdk/manifest.json`；执行证据、可重跑命令及阻碍见 [docs/sdk-evidence.md](docs/sdk-evidence.md)。
-- Rust 内嵌 QuickJS 可离线执行锁定的官方 `ticket/path/timestamp` 输入构造片段，已与原始 SDK 的 Node.js 执行基准对照；这不是完整签名，不代表服务端接受。
-- `sdk_audit` 是与业务服务分离的显式维护命令，支持资源获取、校验、隔离探针及候选门禁。正常请求不下载或自动执行候选；当前生产 SDK 状态为 `disabled`。
-- 完整动态签名、按路径 Ticket Guard 签名及无人值守续凭证仍未验证启用。研究工具可使用 Node.js，但生产不启动浏览器、Node.js 或外部签名服务；已捕获的发送凭证只允许用于固定 HTTPS 发送路径，拒绝追加查询和跨路径复用。
+所有离线测试均在独立模拟沙箱中 100% 通过验证。

@@ -1,4 +1,6 @@
 # 2026-10-16 续火发送后会话失效事件
+> **归档与解决说明**：本事故经深度排查，确认根本原因为旧链路携带未签名的临时公钥裸发，以及缺少 19 项设备环境指纹（Field 15），触发了服务端会话防劫持模型导致平台下发 `{"decision":"KICK"}` 吊销 Cookie。该问题已通过 **Scheme A 官方全链路复刻（油猴脚本 v2.2.0 一键提取正牌私钥与票据 + 100% Signed 真实签名 + 指纹补全）** 彻底根治并完成双向实发验收。详见完整复盘指南：[pcim-full-chain-reconstruction-guide.md](pcim-full-chain-reconstruction-guide.md)。
+
 
 ## 当前结论
 

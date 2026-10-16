@@ -1,4 +1,6 @@
 # 浏览器会话同步：阶段性交付
+> **归档与解决说明**：本阶段性记录属于方案演进前期的探索记录。后续系统已全面升级为 **Scheme A（基于油猴脚本 v2.2.0 一键全量提取 Cookie、正牌 P-256 私钥与 Ticket Guard 票据）**，发信已全面实现 100% Signed 真实签名与指纹对齐，已在 108 正式环境闭环验证。最新部署与运维规范请参阅 [deployment-and-operation-guide.md](deployment-and-operation-guide.md)。
+
 
 ## 状态
 

@@ -200,7 +200,7 @@ export const TAMPERMONKEY_SCRIPT: string = `// ==UserScript==
     }
 
     if (!hasSession) {
-      showToast('⚠️ 未能读取 HttpOnly 凭证(sessionid)！请在油猴扩展设置中开启 Cookie 访问权限，或在 Network 面板复制任一请求为 cURL 后再次点击', false, 6000);
+      showToast('⚠️ 未能读取 HttpOnly 凭证(sessionid)！请在油猴/ScriptCat扩展设置中开启 Cookie 访问权限，然后刷新抖音页面重试', false, 6000);
       return false;
     }
 

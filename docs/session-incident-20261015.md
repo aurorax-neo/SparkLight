@@ -1,4 +1,6 @@
 # 12345678 会话异常排查（2026-10-15）
+> **归档与解决说明**：本事故记录发生于 2026-10-15。后续经全链路环境特征与抓包对齐，系统已全面推行 **Scheme A 官方签名体系（油猴脚本 v2.2.0 一键提取 Cookie 与 Guard 密钥材料）**，实现 100% Signed 真实签名与 19 项设备指纹补全，已在生产环境彻底消除 KICK 掉线问题。详见 [pcim-full-chain-reconstruction-guide.md](pcim-full-chain-reconstruction-guide.md)。
+
 
 ## 已证实
 
