@@ -1,0 +1,24 @@
+{
+  "manifest_version": 3,
+  "name": "SparkLight 抖音会话同步助手",
+  "version": "1.0.0",
+  "description": "无需开发者工具，一键提取当前浏览器抖音 HttpOnly 会话凭证并安全同步至 SparkLight",
+  "icons": {
+    "16": "icon.png",
+    "48": "icon.png",
+    "128": "icon.png"
+  },
+  "permissions": [
+    "cookies",
+    "storage"
+  ],
+  "host_permissions": [
+    "*://*.douyin.com/*",
+    "http://*/*",
+    "https://*/*"
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "SparkLight 抖音同步助手"
+  }
+}

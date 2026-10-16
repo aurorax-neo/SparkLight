@@ -1,0 +1,10 @@
+{
+  "authority": "official SDK fragment executed in Node.js vm; output is input construction, NOT a signature",
+  "parent_sha256": "ef38b30991af9aab6f2ff9a849991c38799a9cc5fcedd3ede006a8eeba90995d",
+  "fragment_sha256": "cf3a88ad944446482a0908cf5d9951eb55ec23652fa4a9d9895e89f4619fd9c5",
+  "parent_byte_range": [191914, 192384],
+  "cases": [
+    {"input":{"path":"/v1/message/send","ticket":"offline-ticket","timestamp":1700000000},"expected":{"req_content":"ticket,path,timestamp","sign_data":"ticket=offline-ticket&path=/v1/message/send&timestamp=1700000000","timestamp":1700000000}},
+    {"input":{"path":"/v1/message/get_by_conversation","ticket":"offline-ticket","timestamp":1700000001},"expected":{"req_content":"ticket,path,timestamp","sign_data":"ticket=offline-ticket&path=/v1/message/get_by_conversation&timestamp=1700000001","timestamp":1700000001}}
+  ]
+}

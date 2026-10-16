@@ -1,0 +1,88 @@
+{
+  "source_sha256": "19584d9b6099b1eb538cb8b30695d47eedf86f2358b03a9f29c3d1de7db851f3",
+  "authority": "extracted official pure input/header/payload functions; Node crypto arithmetic baseline; not live authorization",
+  "offsets": {
+    "r_": 144122,
+    "rw": 144236,
+    "rk": 144363,
+    "rS": 144552,
+    "rT": 144714,
+    "rP": 149292
+  },
+  "test_only_scalar_hex": "0101010101010101010101010101010101010101010101010101010101010101",
+  "public_key_sec1_base64": "BG/wO5SSQc4drdQ1GeaWDgqFtBppoFwygQOqK84VlMoWPE91OlW/AdxT9sCwx+7ni0DG/30lqW4igrmJzvccFEo=",
+  "server_public_spki_base64": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEVQ9HEAPz35fD31Bqx5f2ch+xoft7j2+D0iRJimXIjiQTYJPXAS5QmnNxXL0LAKPMD/S1wBs/+hlqsfsycDa45g==",
+  "timestamp": 1700000001,
+  "ticket": "offline-ticket",
+  "path": "/v1/message/send",
+  "cases": [
+    {
+      "mode": "ecdsa",
+      "ts_sign": "ts.1.offline",
+      "input": {
+        "req_content": "ticket,path,timestamp",
+        "sign_data": "ticket=offline-ticket&path=/v1/message/send&timestamp=1700000001",
+        "timestamp": 1700000001
+      },
+      "signature_base64": "MEUCIQDIkKGmrF5DxJP2yLRnc3HtfF3SgWidUVad6nVxkseVYAIgO5+A58+PqL94aV2m4MDnk0yMrlzQ2ks950WsQtV8HDE=",
+      "client_data_base64": "eyJ0c19zaWduIjoidHMuMS5vZmZsaW5lIiwicmVxX2NvbnRlbnQiOiJ0aWNrZXQscGF0aCx0aW1lc3RhbXAiLCJyZXFfc2lnbiI6Ik1FVUNJUURJa0tHbXJGNUR4SlAyeUxSbmMzSHRmRjNTZ1dpZFVWYWQ2blZ4a3NlVllBSWdPNStBNTgrUHFMOTRhVjJtNE1EbmsweU1ybHpRMmtzOTUwV3NRdFY4SERFPSIsInRpbWVzdGFtcCI6MTcwMDAwMDAwMX0=",
+      "headers": {
+        "bd-ticket-guard-ree-public-key": "BG/wO5SSQc4drdQ1GeaWDgqFtBppoFwygQOqK84VlMoWPE91OlW/AdxT9sCwx+7ni0DG/30lqW4igrmJzvccFEo=",
+        "bd-ticket-guard-web-version": 1,
+        "bd-ticket-guard-web-sign-type": 0,
+        "bd-ticket-guard-version": 2
+      }
+    },
+    {
+      "mode": "hmac",
+      "ts_sign": "ts.1.offline",
+      "input": {
+        "req_content": "ticket,path,timestamp",
+        "sign_data": "ticket=offline-ticket&path=/v1/message/send&timestamp=1700000001",
+        "timestamp": 1700000001
+      },
+      "signature_base64": "vy7sqqnas976+6cxAYx/EyL5rQYZk37BB/JRLXRIuEA=",
+      "client_data_base64": "eyJ0c19zaWduIjoidHMuMS5vZmZsaW5lIiwicmVxX2NvbnRlbnQiOiJ0aWNrZXQscGF0aCx0aW1lc3RhbXAiLCJyZXFfc2lnbiI6InZ5N3NxcW5hczk3Nis2Y3hBWXgvRXlMNXJRWVprMzdCQi9KUkxYUkl1RUE9IiwidGltZXN0YW1wIjoxNzAwMDAwMDAxfQ==",
+      "headers": {
+        "bd-ticket-guard-ree-public-key": "BG/wO5SSQc4drdQ1GeaWDgqFtBppoFwygQOqK84VlMoWPE91OlW/AdxT9sCwx+7ni0DG/30lqW4igrmJzvccFEo=",
+        "bd-ticket-guard-web-version": 1,
+        "bd-ticket-guard-web-sign-type": 1,
+        "bd-ticket-guard-version": 2
+      }
+    },
+    {
+      "mode": "ecdsa",
+      "ts_sign": "ts.2.offline",
+      "input": {
+        "req_content": "ticket,path,timestamp",
+        "sign_data": "ticket=offline-ticket&path=/v1/message/send&timestamp=1700000001",
+        "timestamp": 1700000001
+      },
+      "signature_base64": "MEUCIQC8Gtw5e5RVPozh2lNEi1rQ7UuqDb7cKMu48rYvRTajzQIgPPAU8WNdDREQkyw2u7zLA7buO3JMlukE3os0ZFJ/DDg=",
+      "client_data_base64": "eyJ0c19zaWduIjoidHMuMi5vZmZsaW5lIiwicmVxX2NvbnRlbnQiOiJ0aWNrZXQscGF0aCx0aW1lc3RhbXAiLCJyZXFfc2lnbiI6Ik1FVUNJUUM4R3R3NWU1UlZQb3poMmxORWkxclE3VXVxRGI3Y0tNdTQ4cll2UlRhanpRSWdQUEFVOFdOZERSRVFreXcydTd6TEE3YnVPM0pNbHVrRTNvczBaRkovRERnPSIsInRpbWVzdGFtcCI6MTcwMDAwMDAwMX0=",
+      "headers": {
+        "bd-ticket-guard-ree-public-key": "BG/wO5SSQc4drdQ1GeaWDgqFtBppoFwygQOqK84VlMoWPE91OlW/AdxT9sCwx+7ni0DG/30lqW4igrmJzvccFEo=",
+        "bd-ticket-guard-web-version": 2,
+        "bd-ticket-guard-web-sign-type": 0,
+        "bd-ticket-guard-version": 2
+      }
+    },
+    {
+      "mode": "hmac",
+      "ts_sign": "ts.2.offline",
+      "input": {
+        "req_content": "ticket,path,timestamp",
+        "sign_data": "ticket=offline-ticket&path=/v1/message/send&timestamp=1700000001",
+        "timestamp": 1700000001
+      },
+      "signature_base64": "vy7sqqnas976+6cxAYx/EyL5rQYZk37BB/JRLXRIuEA=",
+      "client_data_base64": "eyJ0c19zaWduIjoidHMuMi5vZmZsaW5lIiwicmVxX2NvbnRlbnQiOiJ0aWNrZXQscGF0aCx0aW1lc3RhbXAiLCJyZXFfc2lnbiI6InZ5N3NxcW5hczk3Nis2Y3hBWXgvRXlMNXJRWVprMzdCQi9KUkxYUkl1RUE9IiwidGltZXN0YW1wIjoxNzAwMDAwMDAxfQ==",
+      "headers": {
+        "bd-ticket-guard-ree-public-key": "BG/wO5SSQc4drdQ1GeaWDgqFtBppoFwygQOqK84VlMoWPE91OlW/AdxT9sCwx+7ni0DG/30lqW4igrmJzvccFEo=",
+        "bd-ticket-guard-web-version": 2,
+        "bd-ticket-guard-web-sign-type": 1,
+        "bd-ticket-guard-version": 2
+      }
+    }
+  ]
+}

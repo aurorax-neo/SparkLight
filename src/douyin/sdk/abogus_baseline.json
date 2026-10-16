@@ -1,0 +1,419 @@
+{
+  "scope": "PUBLIC OFFLINE RESEARCH ONLY; synthetic environment; not browser parity or server acceptance",
+  "parent_sha256": "a0e46f84476d63a1fa57bdcb47223e0e545c6ce0c3dacdd2818180dfa087909e",
+  "research_shim_sha256": "9575a900cfb8387724dc1b96b79dbf57391fccada83ebb776d480f1ad7d5bcfc",
+  "cases": [
+    {
+      "name": "xhr-base",
+      "code": "var x=new XMLHttpRequest();x.open(\"GET\",\"https://www.douyin.com/aweme/v1/web/offline/?aid=6383&text=a%20b%2Bc%26d\");x.send(null)",
+      "init": {
+        "aid": 6383,
+        "paths": [
+          "/aweme/v1/web/",
+          "/v1/message/"
+        ],
+        "pageId": 1
+      },
+      "signatures": [
+        {
+          "length": 192,
+          "sha256": "a0c6a46f966d65bb520a5f599334e1c44be107b1cb9a823fd7f672887ba57e7e",
+          "placeholder": false
+        }
+      ],
+      "network_executed": 0
+    },
+    {
+      "name": "xhr-repeat",
+      "code": "var x=new XMLHttpRequest();x.open(\"GET\",\"https://www.douyin.com/aweme/v1/web/offline/?aid=6383&text=a%20b%2Bc%26d\");x.send(null)",
+      "init": {
+        "aid": 6383,
+        "paths": [
+          "/aweme/v1/web/",
+          "/v1/message/"
+        ],
+        "pageId": 1
+      },
+      "signatures": [
+        {
+          "length": 192,
+          "sha256": "a0c6a46f966d65bb520a5f599334e1c44be107b1cb9a823fd7f672887ba57e7e",
+          "placeholder": false
+        }
+      ],
+      "network_executed": 0
+    },
+    {
+      "name": "xhr-query-plus",
+      "code": "var x=new XMLHttpRequest();x.open(\"GET\",\"https://www.douyin.com/aweme/v1/web/offline/?aid=6383&text=a+b%2Bc%26d\");x.send(null)",
+      "init": {
+        "aid": 6383,
+        "paths": [
+          "/aweme/v1/web/",
+          "/v1/message/"
+        ],
+        "pageId": 1
+      },
+      "signatures": [
+        {
+          "length": 192,
+          "sha256": "a0c6a46f966d65bb520a5f599334e1c44be107b1cb9a823fd7f672887ba57e7e",
+          "placeholder": false
+        }
+      ],
+      "network_executed": 0
+    },
+    {
+      "name": "xhr-query-change",
+      "code": "var x=new XMLHttpRequest();x.open(\"GET\",\"https://www.douyin.com/aweme/v1/web/offline/?aid=6383&text=z%20b%2Bc%26d\");x.send(null)",
+      "init": {
+        "aid": 6383,
+        "paths": [
+          "/aweme/v1/web/",
+          "/v1/message/"
+        ],
+        "pageId": 1
+      },
+      "signatures": [
+        {
+          "length": 192,
+          "sha256": "284a859c894de28b6be800af5e925e999a12e998f3649a7b5b71fb878cde64cc",
+          "placeholder": false
+        }
+      ],
+      "network_executed": 0
+    },
+    {
+      "name": "xhr-post-body-a",
+      "code": "var x=new XMLHttpRequest();x.open(\"POST\",\"https://www.douyin.com/aweme/v1/web/offline/?aid=6383&text=a%20b%2Bc%26d\");x.send(\"text=alpha\")",
+      "init": {
+        "aid": 6383,
+        "paths": [
+          "/aweme/v1/web/",
+          "/v1/message/"
+        ],
+        "pageId": 1
+      },
+      "signatures": [
+        {
+          "length": 192,
+          "sha256": "49513c00ab7be4c21648dc544098bdee0603c96f3c1d9a1728f7cb99520901c2",
+          "placeholder": false
+        }
+      ],
+      "network_executed": 0
+    },
+    {
+      "name": "xhr-post-body-b",
+      "code": "var x=new XMLHttpRequest();x.open(\"POST\",\"https://www.douyin.com/aweme/v1/web/offline/?aid=6383&text=a%20b%2Bc%26d\");x.send(\"text=beta\")",
+      "init": {
+        "aid": 6383,
+        "paths": [
+          "/aweme/v1/web/",
+          "/v1/message/"
+        ],
+        "pageId": 1
+      },
+      "signatures": [
+        {
+          "length": 192,
+          "sha256": "853d2b35de32e6fc1bf802822b90520764e8a83e06f29ad4583f5ac0590dee7e",
+          "placeholder": false
+        }
+      ],
+      "network_executed": 0
+    },
+    {
+      "name": "xhr-method-only",
+      "code": "var x=new XMLHttpRequest();x.open(\"POST\",\"https://www.douyin.com/aweme/v1/web/offline/?aid=6383&text=a%20b%2Bc%26d\");x.send(null)",
+      "init": {
+        "aid": 6383,
+        "paths": [
+          "/aweme/v1/web/",
+          "/v1/message/"
+        ],
+        "pageId": 1
+      },
+      "signatures": [
+        {
+          "length": 192,
+          "sha256": "a0c6a46f966d65bb520a5f599334e1c44be107b1cb9a823fd7f672887ba57e7e",
+          "placeholder": false
+        }
+      ],
+      "network_executed": 0
+    },
+    {
+      "name": "xhr-other-path",
+      "code": "var x=new XMLHttpRequest();x.open(\"GET\",\"https://www.douyin.com/aweme/v1/web/offline-other/?aid=6383&text=a%20b%2Bc%26d\");x.send(null)",
+      "init": {
+        "aid": 6383,
+        "paths": [
+          "/aweme/v1/web/",
+          "/v1/message/"
+        ],
+        "pageId": 1
+      },
+      "signatures": [
+        {
+          "length": 192,
+          "sha256": "a0c6a46f966d65bb520a5f599334e1c44be107b1cb9a823fd7f672887ba57e7e",
+          "placeholder": false
+        }
+      ],
+      "network_executed": 0
+    },
+    {
+      "name": "xhr-existing",
+      "code": "var x=new XMLHttpRequest();x.open(\"GET\",\"https://www.douyin.com/aweme/v1/web/offline/?aid=6383&text=a%20b%2Bc%26d&a_bogus=offline-placeholder\");x.send(null)",
+      "init": {
+        "aid": 6383,
+        "paths": [
+          "/aweme/v1/web/",
+          "/v1/message/"
+        ],
+        "pageId": 1
+      },
+      "signatures": [
+        {
+          "length": 19,
+          "sha256": "c4729e9449860372f25f6dd1b3a96f6f71843078aad27d9375a708bc6bae133d",
+          "placeholder": true
+        }
+      ],
+      "network_executed": 0
+    },
+    {
+      "name": "xhr-unmatched",
+      "code": "var x=new XMLHttpRequest();x.open(\"GET\",\"https://www.douyin.com/unmatched/?aid=6383\");x.send(null)",
+      "init": {
+        "aid": 6383,
+        "paths": [
+          "/aweme/v1/web/",
+          "/v1/message/"
+        ],
+        "pageId": 1
+      },
+      "signatures": [],
+      "network_executed": 0
+    },
+    {
+      "name": "xhr-before-init",
+      "code": "var x=new XMLHttpRequest();x.open(\"GET\",\"https://www.douyin.com/aweme/v1/web/offline/?aid=6383&text=a%20b%2Bc%26d\");x.send(null)",
+      "init": null,
+      "signatures": [],
+      "network_executed": 0
+    },
+    {
+      "name": "xhr-init-aid-only",
+      "code": "var x=new XMLHttpRequest();x.open(\"GET\",\"https://www.douyin.com/aweme/v1/web/offline/?aid=6383&text=a%20b%2Bc%26d\");x.send(null)",
+      "init": {
+        "aid": 6383
+      },
+      "signatures": [],
+      "network_executed": 0
+    },
+    {
+      "name": "xhr-init-page-zero",
+      "code": "var x=new XMLHttpRequest();x.open(\"GET\",\"https://www.douyin.com/aweme/v1/web/offline/?aid=6383&text=a%20b%2Bc%26d\");x.send(null)",
+      "init": {
+        "aid": 6383,
+        "paths": [
+          "/aweme/v1/web/"
+        ],
+        "pageId": 0
+      },
+      "signatures": [
+        {
+          "length": 192,
+          "sha256": "81aca4ed1fec0158979109668a1e0b6063fa710f23fd9592ba64df9e83826ff6",
+          "placeholder": false
+        }
+      ],
+      "network_executed": 0
+    },
+    {
+      "name": "xhr-paths-exclude",
+      "code": "var x=new XMLHttpRequest();x.open(\"GET\",\"https://www.douyin.com/aweme/v1/web/offline/?aid=6383&text=a%20b%2Bc%26d\");x.send(null)",
+      "init": {
+        "aid": 6383,
+        "pageId": 1,
+        "paths": {
+          "include": [
+            "/aweme/v1/web/"
+          ],
+          "exclude": [
+            "offline/"
+          ]
+        }
+      },
+      "signatures": [],
+      "network_executed": 0
+    },
+    {
+      "name": "fetch-base",
+      "code": "fetch(\"https://www.douyin.com/aweme/v1/web/offline/?aid=6383&text=a%20b%2Bc%26d\",{\"method\":\"GET\"})",
+      "init": {
+        "aid": 6383,
+        "paths": [
+          "/aweme/v1/web/",
+          "/v1/message/"
+        ],
+        "pageId": 1
+      },
+      "signatures": [
+        {
+          "length": 192,
+          "sha256": "7ad104b23815ecdcc141fd074356cb35507fccd7b22697a08b7d4cbca75dc10f",
+          "placeholder": false
+        }
+      ],
+      "network_executed": 0
+    },
+    {
+      "name": "fetch-query-plus",
+      "code": "fetch(\"https://www.douyin.com/aweme/v1/web/offline/?aid=6383&text=a+b%2Bc%26d\",{\"method\":\"GET\"})",
+      "init": {
+        "aid": 6383,
+        "paths": [
+          "/aweme/v1/web/",
+          "/v1/message/"
+        ],
+        "pageId": 1
+      },
+      "signatures": [
+        {
+          "length": 192,
+          "sha256": "a0c6a46f966d65bb520a5f599334e1c44be107b1cb9a823fd7f672887ba57e7e",
+          "placeholder": false
+        }
+      ],
+      "network_executed": 0
+    },
+    {
+      "name": "fetch-body-a",
+      "code": "fetch(\"https://www.douyin.com/aweme/v1/web/offline/?aid=6383&text=a%20b%2Bc%26d\",{\"method\":\"POST\",\"body\":\"text=alpha\"})",
+      "init": {
+        "aid": 6383,
+        "paths": [
+          "/aweme/v1/web/",
+          "/v1/message/"
+        ],
+        "pageId": 1
+      },
+      "signatures": [
+        {
+          "length": 192,
+          "sha256": "343bb3a8e20ce698e47cf2061d04169d48f95a8a4c85bcb15072052909c1237f",
+          "placeholder": false
+        }
+      ],
+      "network_executed": 0
+    },
+    {
+      "name": "fetch-body-b",
+      "code": "fetch(\"https://www.douyin.com/aweme/v1/web/offline/?aid=6383&text=a%20b%2Bc%26d\",{\"method\":\"POST\",\"body\":\"text=beta\"})",
+      "init": {
+        "aid": 6383,
+        "paths": [
+          "/aweme/v1/web/",
+          "/v1/message/"
+        ],
+        "pageId": 1
+      },
+      "signatures": [
+        {
+          "length": 192,
+          "sha256": "77f1e0872c062b244a9cddebf48af1ba153f05399625676c7df67e021ce9d094",
+          "placeholder": false
+        }
+      ],
+      "network_executed": 0
+    },
+    {
+      "name": "fetch-existing",
+      "code": "fetch(\"https://www.douyin.com/aweme/v1/web/offline/?aid=6383&text=a%20b%2Bc%26d&a_bogus=offline-placeholder\",{\"method\":\"GET\"})",
+      "init": {
+        "aid": 6383,
+        "paths": [
+          "/aweme/v1/web/",
+          "/v1/message/"
+        ],
+        "pageId": 1
+      },
+      "signatures": [
+        {
+          "length": 19,
+          "sha256": "c4729e9449860372f25f6dd1b3a96f6f71843078aad27d9375a708bc6bae133d",
+          "placeholder": true
+        },
+        {
+          "length": 192,
+          "sha256": "4cdc4acafbfb91d21c9d8bf11d96b1d4086e63b91d8f6024cfa8b9529ea357cb",
+          "placeholder": false
+        }
+      ],
+      "network_executed": 0
+    },
+    {
+      "name": "xhr-null-body",
+      "code": "var x=new XMLHttpRequest();x.open(\"POST\",\"https://www.douyin.com/aweme/v1/web/offline/?aid=6383&text=a%20b%2Bc%26d\");x.send(null)",
+      "init": {
+        "aid": 6383,
+        "paths": [
+          "/aweme/v1/web/",
+          "/v1/message/"
+        ],
+        "pageId": 1
+      },
+      "signatures": [
+        {
+          "length": 192,
+          "sha256": "a0c6a46f966d65bb520a5f599334e1c44be107b1cb9a823fd7f672887ba57e7e",
+          "placeholder": false
+        }
+      ],
+      "network_executed": 0
+    },
+    {
+      "name": "xhr-object-body",
+      "code": "var x=new XMLHttpRequest();x.open(\"POST\",\"https://www.douyin.com/aweme/v1/web/offline/?aid=6383&text=a%20b%2Bc%26d\");x.send({\"text\":\"alpha\"})",
+      "init": {
+        "aid": 6383,
+        "paths": [
+          "/aweme/v1/web/",
+          "/v1/message/"
+        ],
+        "pageId": 1
+      },
+      "signatures": [
+        {
+          "length": 192,
+          "sha256": "a0c6a46f966d65bb520a5f599334e1c44be107b1cb9a823fd7f672887ba57e7e",
+          "placeholder": false
+        }
+      ],
+      "network_executed": 0
+    },
+    {
+      "name": "xhr-empty-body",
+      "code": "var x=new XMLHttpRequest();x.open(\"POST\",\"https://www.douyin.com/aweme/v1/web/offline/?aid=6383&text=a%20b%2Bc%26d\");x.send(\"\")",
+      "init": {
+        "aid": 6383,
+        "paths": [
+          "/aweme/v1/web/",
+          "/v1/message/"
+        ],
+        "pageId": 1
+      },
+      "signatures": [
+        {
+          "length": 192,
+          "sha256": "a0c6a46f966d65bb520a5f599334e1c44be107b1cb9a823fd7f672887ba57e7e",
+          "placeholder": false
+        }
+      ],
+      "network_executed": 0
+    }
+  ]
+}

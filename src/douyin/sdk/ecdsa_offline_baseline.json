@@ -1,0 +1,52 @@
+{
+  "scope": "PUBLIC OFFLINE TEST KEY ONLY; official ECDSA fragment, not complete SDK or server acceptance",
+  "parent_sha256": "ef38b30991af9aab6f2ff9a849991c38799a9cc5fcedd3ede006a8eeba90995d",
+  "fragments": [
+    {
+      "range": [
+        35909,
+        36314
+      ],
+      "sha256": "117aaabc7db5d9a6edbdec13e3e6e2f2db45180feaa9dcac916c9f29ca7ff5d6"
+    },
+    {
+      "range": [
+        36984,
+        37526
+      ],
+      "sha256": "9c2d559b1c55510aafe1d5a7725fd3dfe3a999d0193389aa18b7412b00d0bb28"
+    },
+    {
+      "range": [
+        41200,
+        41991
+      ],
+      "sha256": "e654185f238a0a1c4bad6af727774796416120d78fff7faba987537a27bdf67b"
+    }
+  ],
+  "test_scalar_hex": "0000000000000000000000000000000000000000000000000000000000000001",
+  "public_key_sec1_base64": "BGsX0fLhLEJH+Lzm5WOkQPJ3A32BLeszoPShOUXYmMKWT+NC4v4af5uO5+tKfA+eFivOM1drMV7Oy7ZAaDe/UfU=",
+  "public_key_spki_base64": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEaxfR8uEsQkf4vOblY6RA8ncDfYEt6zOg9KE5RdiYwpZP40Li/hp/m47n60p8D54WK84zV2sxXs7LtkBoN79R9Q==",
+  "cases": [
+    {
+      "input": {
+        "path": "/v1/message/send",
+        "ticket": "offline-ticket",
+        "timestamp": 1700000000
+      },
+      "sign_data": "ticket=offline-ticket&path=/v1/message/send&timestamp=1700000000",
+      "official_signature_der_base64": "MEYCIQDbQuOv/650YaFeLJfp62MnQjuL5bP1atd87M7dZNZSDAIhAN4kcCG/dHzF0cMkWfuOPHbGgcVg43LqhplvzLAZ4Sde",
+      "rust_signature_der_base64": "MEUCICo/qbdp0U+r63pPuTTX+h5Hm8rU/xmyQTpGUMBmo90SAiEA4g88xMKBRk+xy6XUexxfFFUBd/p+A4TgYMSKdm1nXvk="
+    },
+    {
+      "input": {
+        "path": "/v1/message/get_by_conversation",
+        "ticket": "offline-ticket",
+        "timestamp": 1700000001
+      },
+      "sign_data": "ticket=offline-ticket&path=/v1/message/get_by_conversation&timestamp=1700000001",
+      "official_signature_der_base64": "MEQCIErBka6zrrgoPelRYDFzseN9ebXZFKrqvTh+sKeOAPjLAiAMcrnf9aD1tLGn9NyY3lA+6bo+SdkrLdCDbAbTAQuGpA==",
+      "rust_signature_der_base64": "MEUCIQDx1wbDjRxeNBYgm0klSmdQrMgsM0PnXrMreWkJbhI5iQIgMUYiFTskSB440NdQYzgBTmZWmnbNPmjQ+AZZdyHszmM="
+    }
+  ]
+}

@@ -1,0 +1,43 @@
+// 固定公开研究样例；执行锁定完整官方 BDMS，最终网络始终拒绝；不是生产签名器。
+const fs=require('node:fs'),vm=require('node:vm'),crypto=require('node:crypto'),assert=require('node:assert/strict');
+const hash=b=>crypto.createHash('sha256').update(b).digest('hex');
+const parent=fs.readFileSync(process.argv[2]);
+const pin='a0e46f84476d63a1fa57bdcb47223e0e545c6ce0c3dacdd2818180dfa087909e';
+assert.equal(parent.length,147530);assert.equal(hash(parent),pin,'官方资源完整性失败');
+const mode=process.argv[3];assert.ok(['--check','--generate-public-fixture'].includes(mode));
+const shim=fs.readFileSync('src/douyin/sdk/abogus_research.js','utf8');
+const base='https://www.douyin.com/aweme/v1/web/offline/?aid=6383&text=a%20b%2Bc%26d';
+const xhr=(url=base,body=null,method='GET')=>`var x=new XMLHttpRequest();x.open(${JSON.stringify(method)},${JSON.stringify(url)});x.send(${JSON.stringify(body)})`;
+const fetch=(url=base,body,method='GET')=>`fetch(${JSON.stringify(url)},${JSON.stringify({method,...(body===undefined?{}:{body})})})`;
+const cases=[['xhr-base',xhr()],['xhr-repeat',xhr()],['xhr-query-plus',xhr(base.replace('%20','+'))],['xhr-query-change',xhr(base.replace('a%20b','z%20b'))],['xhr-post-body-a',xhr(base,'text=alpha','POST')],['xhr-post-body-b',xhr(base,'text=beta','POST')],['xhr-method-only',xhr(base,null,'POST')],['xhr-other-path',xhr(base.replace('offline/','offline-other/'))],['xhr-existing',xhr(base+'&a_bogus=offline-placeholder')],['xhr-unmatched',xhr('https://www.douyin.com/unmatched/?aid=6383')],['xhr-before-init',xhr(),null],['xhr-init-aid-only',xhr(),{aid:6383}],['xhr-init-page-zero',xhr(),{aid:6383,paths:['/aweme/v1/web/'],pageId:0}],['xhr-paths-exclude',xhr(),{aid:6383,pageId:1,paths:{include:['/aweme/v1/web/'],exclude:['offline/']}}],['fetch-base',fetch()],['fetch-query-plus',fetch(base.replace('%20','+'))],['fetch-body-a',fetch(base,'text=alpha','POST')],['fetch-body-b',fetch(base,'text=beta','POST')],['fetch-existing',fetch(base+'&a_bogus=offline-placeholder')],['xhr-null-body',xhr(base,null,'POST')],['xhr-object-body',xhr(base,{text:'alpha'},'POST')],['xhr-empty-body',xhr(base,'','POST')]];
+const rows=[];
+for(const [name,code,init] of cases){
+ const ctx=vm.createContext({URL,URLSearchParams,Request,Headers,Response,TextEncoder,TextDecoder,atob,btoa});
+ vm.runInContext(shim,ctx,{timeout:2000});
+ vm.runInContext(parent.toString('utf8'),ctx,{timeout:2000});
+ const config=init===undefined?{aid:6383,paths:['/aweme/v1/web/','/v1/message/'],pageId:1}:init;
+ if(config!==null)vm.runInContext(`bdms.init(${JSON.stringify(config)})`,ctx,{timeout:2000});
+ const sinks=JSON.parse(vm.runInContext(`JSON.stringify(offlineCase(${JSON.stringify(code)}))`,ctx,{timeout:2000}));
+ assert.equal(sinks.length,1,'必须恰好到达一次拒绝的网络末端');
+ const u=new URL(sinks[0].url);
+ rows.push({name,code,init:config,signatures:u.searchParams.getAll('a_bogus').map(s=>({length:s.length,sha256:hash(s),placeholder:s==='offline-placeholder'})),network_executed:0});
+}
+const sig=name=>rows.find(r=>r.name===name).signatures[0]?.sha256;
+assert.equal(sig('xhr-base'),sig('xhr-repeat'));
+assert.equal(sig('xhr-base'),sig('xhr-query-plus'));
+assert.notEqual(sig('xhr-base'),sig('xhr-query-change'));
+assert.notEqual(sig('xhr-post-body-a'),sig('xhr-post-body-b'));
+assert.equal(sig('xhr-base'),sig('xhr-method-only'));
+assert.equal(sig('xhr-base'),sig('xhr-other-path'));
+assert.notEqual(sig('fetch-base'),sig('fetch-query-plus'));
+assert.notEqual(sig('fetch-body-a'),sig('fetch-body-b'));
+assert.equal(sig('xhr-object-body'),sig('xhr-empty-body'));
+for(const name of ['xhr-before-init','xhr-init-aid-only','xhr-unmatched','xhr-paths-exclude'])assert.equal(rows.find(r=>r.name===name).signatures.length,0);
+assert.equal(rows.find(r=>r.name==='xhr-existing').signatures.length,1);
+assert.ok(rows.find(r=>r.name==='xhr-existing').signatures[0].placeholder);
+assert.equal(rows.find(r=>r.name==='fetch-existing').signatures.length,2);
+const fixture={scope:'PUBLIC OFFLINE RESEARCH ONLY; synthetic environment; not browser parity or server acceptance',parent_sha256:pin,research_shim_sha256:hash(shim),cases:rows};
+const path='src/douyin/sdk/abogus_baseline.json';
+if(mode==='--generate-public-fixture')fs.writeFileSync(path,JSON.stringify(fixture,null,2)+'\n',{flag:'wx'});
+else assert.deepEqual(fixture,JSON.parse(fs.readFileSync(path,'utf8')),'官方离线执行基准发生变化');
+console.log(JSON.stringify({official_resource_sha256:pin,cases:rows.length,matched:true,network_executed:0,production_enabled:false,scope:'full BDMS XHR and fetch(string) interception with fixed public inputs only'}));

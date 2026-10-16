@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "adapter_abi": 1,
+  "resources": [
+    {"name":"90775.0c663da7.js","url":"https://lf-douyin-pc-web.douyinstatic.com/obj/douyin-pc-web/ies/douyin_web/async/90775.0c663da7.js","version":"3.3.20 / chunk 90775.0c663da7","sha256":"ef38b30991af9aab6f2ff9a849991c38799a9cc5fcedd3ede006a8eeba90995d","size":243451,"entrypoint":"window.securitySDK.getBdTicketGuardHeader; generateCertHeader; refresh"},
+    {"name":"webmssdk.es5.js","url":"https://lf-c-flwb.bytetos.com/obj/rc-client-security/c-webmssdk/1.0.0.20/webmssdk.es5.js","version":"1.0.0.20","sha256":"3c138a74319cf36dd5a63920ecd4624875593c306f2ac68f157a68c465381075","size":387196,"entrypoint":"window.byted_acrawler.frontierSign (observed X-Bogus, not proven a_bogus)"},
+    {"name":"bdms_1.0.1.19_fix.js","url":"https://p-pc-weboff.byteimg.com/tos-cn-i-9r5gewecjs/bdms_1.0.1.19_fix.js","version":"1.0.1.19-fix.01","sha256":"a0e46f84476d63a1fa57bdcb47223e0e545c6ce0c3dacdd2818180dfa087909e","size":147530,"entrypoint":"window.bdms.init({aid,paths,pageId}) -> XHR.send / fetch(string) interception; a_bogus offline baseline only"},
+    {"name":"sdk-glue.js","url":"https://lf-c-flwb.bytetos.com/obj/rc-client-security/web/glue/1.0.0.64-fix.01/sdk-glue.js","version":"1.0.0.64-fix.01","sha256":"0ccf4a589b80bdda1a46efddf84a31ba9ca4826f4ac8a46661c35471d30d16c8","size":100348,"entrypoint":"window._SdkGlueInit (bootstrap; no standalone signing claim)"}
+  ],
+  "capabilities": {"dynamic_request":"unsupported","ticket_guard":"offline_only","renewal":"unsupported"},
+  "evidence": [
+    "Observed official script/resource URLs on authorized account 12345678; fetched public bytes via HTTPS on 2026-10-14",
+    "docs/sdk-evidence.md: official input, ECDSA interoperability, BDMS 22-case offline interception baseline and trusted-time evidence",
+    "All production capabilities remain disabled; offline baselines do not approve browser parity, independent key registration or server acceptance"
+  ]
+}

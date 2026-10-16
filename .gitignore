@@ -1,0 +1,30 @@
+# Rust build artifacts
+target/
+**/*.rs.bk
+
+# Node & Frontend
+node_modules/
+frontend/node_modules/
+frontend/.vite/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Runtime data & secrets
+data/
+.master-key
+*.master-key
+*.db
+*.db-shm
+*.db-wal
+.env
+local.env
+
+# Agent & Workspace State
+.pi/
+
+# System & OS
+.DS_Store
+Thumbs.db

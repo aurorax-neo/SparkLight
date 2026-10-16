@@ -1,0 +1,11 @@
+{
+  "scope": "Official anchor calculation and expiry; Rust additionally rejects rollback and clock jumps",
+  "parent_sha256": "ef38b30991af9aab6f2ff9a849991c38799a9cc5fcedd3ede006a8eeba90995d",
+  "cases": [
+    {"monotonic_ms":1000,"wall_ms":1000000,"expected":{"timestamp":1700000000,"age_ms":0,"signable":true}},
+    {"monotonic_ms":4999,"wall_ms":1003999,"expected":{"timestamp":1700000003,"age_ms":3999,"signable":true}},
+    {"monotonic_ms":3600999,"wall_ms":4599999,"expected":{"timestamp":1700003599,"age_ms":3599999,"signable":true}},
+    {"monotonic_ms":3601000,"wall_ms":4600000,"expected":{"timestamp":1700003600,"age_ms":3600000,"signable":false}},
+    {"monotonic_ms":1000,"wall_ms":4600000,"expected":{"timestamp":1700000000,"age_ms":3600000,"signable":false}}
+  ]
+}

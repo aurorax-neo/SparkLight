@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <title>SparkLight 同步助手</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      width: 360px;
+      padding: 16px;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "PingFang SC", sans-serif;
+      background: #0f172a;
+      color: #f8fafc;
+      font-size: 13px;
+    }
+    .header {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 14px;
+    }
+    .logo {
+      width: 32px;
+      height: 32px;
+      border-radius: 8px;
+      background: linear-gradient(135deg, #f97316 0%, #ea580c 100%);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 16px;
+    }
+    .title {
+      font-size: 14px;
+      font-weight: 700;
+      color: #f8fafc;
+    }
+    .subtitle {
+      font-size: 11px;
+      color: #94a3b8;
+    }
+    .card {
+      background: #1e293b;
+      border: 1px solid #334155;
+      border-radius: 12px;
+      padding: 12px;
+      margin-bottom: 12px;
+    }
+    .field {
+      margin-bottom: 10px;
+    }
+    .field:last-child {
+      margin-bottom: 0;
+    }
+    .label {
+      display: block;
+      font-size: 11px;
+      color: #94a3b8;
+      margin-bottom: 4px;
+    }
+    input {
+      width: 100%;
+      background: #0f172a;
+      border: 1px solid #475569;
+      border-radius: 8px;
+      padding: 7px 10px;
+      color: #f8fafc;
+      font-size: 12px;
+      outline: none;
+    }
+    input:focus {
+      border-color: #f97316;
+    }
+    .user-box {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .avatar {
+      width: 36px;
+      height: 36px;
+      border-radius: 50%;
+      background: #334155;
+      object-fit: cover;
+    }
+    .user-info {
+      flex: 1;
+      min-width: 0;
+    }
+    .user-name {
+      font-weight: 600;
+      font-size: 13px;
+      color: #f8fafc;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .user-uid {
+      font-size: 11px;
+      color: #94a3b8;
+      font-family: monospace;
+    }
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      font-size: 10px;
+      font-weight: 600;
+      padding: 2px 6px;
+      border-radius: 9999px;
+    }
+    .badge-success { background: rgba(34, 197, 94, 0.2); color: #86efac; border: 1px solid rgba(34, 197, 94, 0.4); }
+    .badge-warning { background: rgba(245, 158, 11, 0.2); color: #fde68a; border: 1px solid rgba(245, 158, 11, 0.4); }
+    .badge-error { background: rgba(239, 68, 68, 0.2); color: #fca5a5; border: 1px solid rgba(239, 68, 68, 0.4); }
+    .btn {
+      width: 100%;
+      background: linear-gradient(135deg, #f97316 0%, #ea580c 100%);
+      color: #ffffff;
+      border: none;
+      border-radius: 10px;
+      padding: 10px;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      transition: opacity 0.2s;
+    }
+    .btn:hover { opacity: 0.92; }
+    .btn:disabled { opacity: 0.4; cursor: not-allowed; }
+    .status-msg {
+      margin-top: 10px;
+      font-size: 11px;
+      padding: 8px 10px;
+      border-radius: 8px;
+      display: none;
+      line-height: 1.4;
+    }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <div class="logo">🔥</div>
+    <div>
+      <div class="title">SparkLight 同步助手</div>
+      <div class="subtitle">无需复制 cURL · 一键安全同步</div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="label">当前浏览器抖音账号</div>
+    <div class="user-box" id="user-container">
+      <div class="avatar" id="avatar-placeholder" style="display:flex;align-items:center;justify-content:center;color:#94a3b8;font-weight:bold;">抖</div>
+      <img class="avatar" id="user-avatar" style="display:none;" alt="">
+      <div class="user-info">
+        <div class="user-name" id="user-name">正在检测登录态...</div>
+        <div class="user-uid" id="user-uid">请确保已在浏览器登录抖音</div>
+      </div>
+      <span class="badge badge-warning" id="status-badge">检测中</span>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="field">
+      <label class="label" for="server-url">SparkLight 服务地址</label>
+      <input type="text" id="server-url" value="http://10.96.1.108:11090" placeholder="例如: http://10.96.1.108:11090">
+    </div>
+    <div class="field">
+      <label class="label" for="api-key">API 授权密钥 (可在设置页面查看)</label>
+      <input type="password" id="api-key" placeholder="输入系统设置中的 API Key">
+    </div>
+  </div>
+
+  <button class="btn" id="sync-btn" disabled>
+    <span>一键同步当前会话到 108</span>
+  </button>
+
+  <div class="status-msg" id="status-msg"></div>
+
+  <script src="popup.js"></script>
+</body>
+</html>
