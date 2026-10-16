@@ -144,6 +144,8 @@ pub struct ServerMaterial {
     pub client_cert: String,
     #[serde(default)]
     pub create_time: Option<i64>,
+    #[serde(default)]
+    pub log_id: Option<String>,
 }
 #[derive(Serialize)]
 struct ClientData<'a> { ts_sign: &'a str, req_content: &'a str, req_sign: &'a str, timestamp: i64 }
@@ -156,10 +158,18 @@ impl BoundGuardMaterial {
     pub fn from_saved(json: &str, uid: u64, cookie: &str, acquired_at: i64, expected_public: &str) -> Result<Self> {
         let data: ServerMaterial = serde_json::from_str(json).context("GUARD_DESERIALIZE_SERVER_DATA")?;
         ensure!(data.client_cert.strip_prefix("pub.") == Some(expected_public), "GUARD_KEY_BINDING_MISMATCH");
+        let now = chrono::Utc::now().timestamp();
+        ensure!(now.saturating_sub(acquired_at) <= 86400 * 3, "GUARD_MATERIAL_EXPIRED_BY_ACQUIRED_AT: 当前账号 Guard 签名票据材料已超过 3 天，已拦截发送以防被平台注销会话；请在抖音页面使用油猴脚本重新一键提取最新凭证导入");
         if let Some(ct) = data.create_time {
-            let now = chrono::Utc::now().timestamp();
-            // 票据生成时间早于 3 天前判定为失效票据，拒绝发送以防被平台 KICK 封禁会话
             ensure!(ct <= 0 || now.saturating_sub(ct) <= 86400 * 3, "GUARD_MATERIAL_EXPIRED_BY_CREATE_TIME: 当前账号 Guard 签名票据已过期（生成时间超过3天），已拦截发送以防被平台注销会话；请在抖音页面使用油猴脚本重新一键提取最新凭证导入");
+        }
+        if let Some(log_id) = &data.log_id {
+            if log_id.len() >= 8 && log_id[..8].chars().all(|c| c.is_ascii_digit()) {
+                if let Ok(log_date) = chrono::NaiveDate::parse_from_str(&log_id[..8], "%Y%m%d") {
+                    let current_date = chrono::Utc::now().date_naive();
+                    ensure!((current_date - log_date).num_days() <= 3, "GUARD_MATERIAL_EXPIRED_BY_LOG_ID: 当前账号 Guard 签名票据 log_id 显示生成时间早于 3 天前，已拦截发送以防被平台注销会话；请在抖音页面使用油猴脚本重新一键提取最新凭证导入");
+                }
+            }
         }
         Ok(Self {
             data,

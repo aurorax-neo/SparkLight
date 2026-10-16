@@ -419,11 +419,11 @@ impl SparkEngine {
         }
     }
 
-    pub async fn execute_single_account(&self, account_id: &str, force_resend: bool) -> Result<ExecutionSummary> {
+    pub async fn execute_single_account(&self, account_id: &str, force_resend: bool, notify_on_failure: bool) -> Result<ExecutionSummary> {
         let account = db::get_account(&self.pool, account_id)
             .await?
             .ok_or_else(|| anyhow::anyhow!("账号不存在"))?;
-        let result = self.execute_account(&account, force_resend).await;
+        let result = self.execute_account(&account, force_resend, notify_on_failure).await;
         self.finish_account_execution(&account, result).await
     }
 
@@ -446,13 +446,13 @@ impl SparkEngine {
         result.map_err(|error| ExecutionDiagnostic::classify(&error).into())
     }
 
-    async fn execute_account(&self, account: &Account, force_resend: bool) -> Result<ExecutionSummary> {
+    async fn execute_account(&self, account: &Account, force_resend: bool, notify_on_failure: bool) -> Result<ExecutionSummary> {
         let account_id = account.id.as_str();
         if account.status == "DISABLED" {
             bail!("账号已被禁用");
         }
 
-        let is_valid = self.check_account_cookie(account, !force_resend).await?;
+        let is_valid = self.check_account_cookie(account, notify_on_failure).await?;
         if !is_valid {
             let mut summary = ExecutionSummary::stopped(account, ExecutionDiagnostic::SessionUnconfirmed);
             summary.cookie_status = db::get_account(&self.pool, account_id).await?.context("账号不存在")?.status;
@@ -630,8 +630,8 @@ impl SparkEngine {
                     &fail_log_msg,
                 ).await.ok();
 
-                // 手动测试操作（force_resend == true）直接在网页前端提示结果，严禁向 Bark 发送推送通知打扰用户
-                if !force_resend {
+                // 仅在明确启用失败告警（notify_on_failure == true）时向 Bark 发送通知，前台手动操作一律静默
+                if notify_on_failure {
                     let alert_body = format!(
                         "对好友「{}」自动续火花尝试 {} 次后失败！\n原因: {}",
                         target.target_nickname, attempt, result.message
@@ -696,7 +696,7 @@ impl SparkEngine {
     }
 
     /// Execute spark renewal for all active accounts sequentially
-    pub async fn execute_all_accounts(&self, force_resend: bool) -> Result<BatchSummary> {
+    pub async fn execute_all_accounts(&self, force_resend: bool, notify_on_failure: bool) -> Result<BatchSummary> {
         if self.is_running.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_err() {
             bail!("已有续火花任务正在执行中，请勿重复触发");
         }
@@ -713,7 +713,7 @@ impl SparkEngine {
             }
             active_accounts += 1;
 
-            match self.execute_single_account(&account.id, force_resend).await {
+            match self.execute_single_account(&account.id, force_resend, notify_on_failure).await {
                 Ok(summary) => summaries.push(summary),
                 Err(e) => {
                     let diagnostic = ExecutionDiagnostic::classify(&e);
@@ -729,7 +729,7 @@ impl SparkEngine {
     }
 
     /// 手动单目标测试：验证所属账号身份，仅一次发送，立即复查同一客户端凭证。
-    pub async fn execute_single_target(&self, target_id: &str) -> Result<crate::douyin::types::SendSparkResult> {
+    pub async fn execute_single_target(&self, target_id: &str, notify_on_failure: bool) -> Result<crate::douyin::types::SendSparkResult> {
         let target = db::get_target(&self.pool, target_id)
             .await?
             .ok_or_else(|| anyhow::anyhow!("续火花目标不存在"))?;
@@ -737,7 +737,7 @@ impl SparkEngine {
         let account = db::get_account(&self.pool, &target.account_id)
             .await?
             .ok_or_else(|| anyhow::anyhow!("对应账号不存在"))?;
-        let result = self.execute_target_inner(&account, &target, true).await;
+        let result = self.execute_target_inner(&account, &target, true, notify_on_failure).await;
         if let Err(error) = &result {
             self.finish_account_execution(&account, Err(anyhow::anyhow!(ExecutionDiagnostic::classify(error)))).await?;
         }
@@ -745,9 +745,9 @@ impl SparkEngine {
     }
 
     async fn execute_target(&self, account: &Account, target: &SparkTarget) -> Result<crate::douyin::types::SendSparkResult> {
-        self.execute_target_inner(account, target, false).await
+        self.execute_target_inner(account, target, false, true).await
     }
-    async fn execute_target_inner(&self, account: &Account, target: &SparkTarget, force: bool) -> Result<crate::douyin::types::SendSparkResult> {
+    async fn execute_target_inner(&self, account: &Account, target: &SparkTarget, force: bool, notify_on_failure: bool) -> Result<crate::douyin::types::SendSparkResult> {
         anyhow::ensure!(account.status != "DISABLED", "账号已被禁用");
 
         let cid = target_conversation_id(account,target)?;
@@ -843,8 +843,8 @@ impl SparkEngine {
                 &format!("手动单目标尝试 {attempts} 次后失败: {}", result.message),
             ).await.ok();
 
-            // 手动测试操作（force == true）直接在网页前端提示结果，严禁向 Bark 发送推送通知打扰用户
-            if !force {
+            // 仅在明确启用失败告警（notify_on_failure == true）时向 Bark 发送通知，前台手动操作一律静默
+            if notify_on_failure {
                 self.notifier.send_notification(
                     account.bark_key_override.as_deref(),
                     "【抖音火花助手】续火花失败",
@@ -970,7 +970,7 @@ pub fn start_daily_scheduler(engine: Arc<SparkEngine>) {
 
                     let engine_clone = engine.clone();
                     tokio::spawn(async move {
-                        match engine_clone.execute_all_accounts(false).await {
+                        match engine_clone.execute_all_accounts(false, true).await {
                             Err(_) => tracing::error!("每日自动续火花执行失败（任务未完成）"),
                             Ok(summary) => match summary.status {
                                 ExecutionStatus::Failed => tracing::error!(failed_accounts = summary.failed_accounts, "每日自动续火花执行失败"),
@@ -1227,7 +1227,7 @@ mod diagnostic_tests {
         let (engine, account, _) = fixture().await;
         let encrypted = engine.secret_box.encrypt(b"offline-secret-malformed-context").unwrap();
         sqlx::query("INSERT INTO account_web_contexts VALUES(?,?)").bind(&account.id).bind(encrypted).execute(&engine.pool).await.unwrap();
-        let error = engine.execute_single_account(&account.id, false).await.unwrap_err();
+        let error = engine.execute_single_account(&account.id, false, false).await.unwrap_err();
         assert_eq!(ExecutionDiagnostic::classify(&error), ExecutionDiagnostic::WebContextInvalid);
         assert_diagnostic(&engine, &account, ExecutionDiagnostic::WebContextInvalid).await;
         assert_eq!(db::get_account(&engine.pool, &account.id).await.unwrap().unwrap().status, "ACTIVE");
@@ -1244,7 +1244,7 @@ mod diagnostic_tests {
             let encrypted = engine.secret_box.encrypt(b"offline-secret-invalid-context").unwrap();
             sqlx::query("INSERT INTO account_web_contexts VALUES(?,?)").bind(&account.id).bind(encrypted).execute(&engine.pool).await.unwrap();
         }
-        let batch = engine.execute_all_accounts(false).await.unwrap();
+        let batch = engine.execute_all_accounts(false, false).await.unwrap();
         assert_eq!(batch.status, ExecutionStatus::Failed);
         assert_eq!(batch.failed_accounts, 2);
         assert_eq!(batch.successful_accounts, 0);

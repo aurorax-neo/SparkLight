@@ -447,7 +447,7 @@ pub async fn run_account(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
-    let summary = state.engine.execute_single_account(&id, true).await
+    let summary = state.engine.execute_single_account(&id, true, false).await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"code": 500, "message": e.to_string()}))))?;
 
     Ok(Json(json!({

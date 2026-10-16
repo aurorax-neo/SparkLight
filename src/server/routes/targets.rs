@@ -387,7 +387,7 @@ pub async fn test_target(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
-    let result = state.engine.execute_single_target(&id).await
+    let result = state.engine.execute_single_target(&id, false).await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"code": 500, "message": e.to_string()}))))?;
 
     let is_already_sent = result.message.contains("今日已确认发送") || result.message.contains("今日已发送");

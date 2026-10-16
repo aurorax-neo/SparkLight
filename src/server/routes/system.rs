@@ -49,7 +49,7 @@ pub async fn run_all(
     Json(req): Json<RunAllReq>,
 ) -> Result<impl IntoResponse, (axum::http::StatusCode, Json<serde_json::Value>)> {
     let force = req.force_resend.unwrap_or(false);
-    let summary = state.engine.execute_all_accounts(force).await
+    let summary = state.engine.execute_all_accounts(force, false).await
         .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"code": 500, "message": e.to_string()}))))?;
 
     Ok(Json(json!({
