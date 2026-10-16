@@ -329,7 +329,7 @@ impl DouyinClient {
             (0..176).map(|_| { let idx = rng.gen_range(0..CHARSET.len()); CHARSET[idx] as char }).collect()
         });
         let request=self.web_request(Method::GET,"https://www.douyin.com/passport/safe/get_identity_security_token/")?
-            .query(&[("scene","web_im"),("auto_retry_req","0"),("skip_verify","false"),("identity_token_force_get_tag","0"),
+            .query(&[("aid","6383"),("scene","web_im"),("auto_retry_req","0"),("skip_verify","false"),("identity_token_force_get_tag","0"),
                 ("biz_trace_id",&biz_trace_id),("id_token_version","1.2.10"),("passport_jssdk_version","4.2.3"),("passport_jssdk_type","lite"),
                 ("is_from_ttaccountsdk","1"),("language","zh"),("msToken",&ms_token)])
             .header("x-tt-passport-csrf-token",self.extract_cookie_val("passport_csrf_token").or_else(||self.extract_cookie_val("passport_csrf_token_default")).unwrap_or_default())
@@ -340,9 +340,10 @@ impl DouyinClient {
             .header("accept", "application/json, text/javascript");
         let response=self.web_json(request).await?;
         let old_ctx = self.web_context.lock().unwrap().clone();
-        let mut context=super::im_auth::WebSessionContext::from_session(uid,&cookie,DEFAULT_USER_AGENT)?.with_identity(&response)?;
-        if let Some(old) = old_ctx {
-            context.inherit_guard_materials(&old);
+        let ua = old_ctx.as_ref().map(|o| o.user_agent.as_str()).unwrap_or(DEFAULT_USER_AGENT);
+        let mut context=super::im_auth::WebSessionContext::from_session(uid,&cookie,ua)?.with_identity(&response)?;
+        if let Some(ref old) = old_ctx {
+            context.inherit_guard_materials(old);
         }
         anyhow::ensure!(matches!(self.check_cookie().await,CheckCookieResult::Valid(_)),"IM 身份凭证获取后登录态未确认，未保存凭证");
         self.verified_sender_uid(Some(&uid.to_string()))?;

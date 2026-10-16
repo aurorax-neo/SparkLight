@@ -70,6 +70,18 @@ impl WebSessionContext {
         }
         let token=data.get("identity_security_token").and_then(|v|v.as_str()).filter(|v|!v.trim().is_empty()&&v.len()<=16*1024).context("IM 身份 Token 缺失或无效")?;
         let device=data.get("device_id").and_then(|v|v.as_str()).filter(|v|!v.trim().is_empty()&&v.len()<=1024).context("IM 服务器设备身份缺失或无效")?;
+        let mut clean_envelope = Vec::new();
+        for (n, w, b) in parse_protobuf_fields(&self.envelope) {
+            if n == 15 && w == 2 {
+                if let Ok(key) = field_text(&b, 1) {
+                    if ["identity_security_token", "identity_security_device_id", "identity_security_aid"].contains(&key.as_str()) {
+                        continue;
+                    }
+                }
+            }
+            append_field(n, w, &b, &mut clean_envelope);
+        }
+        self.envelope = clean_envelope;
         append_header("identity_security_token",&serde_json::json!({"token":token}).to_string(),&mut self.envelope);
         append_header("identity_security_device_id",device,&mut self.envelope);
         append_header("identity_security_aid","6383",&mut self.envelope);

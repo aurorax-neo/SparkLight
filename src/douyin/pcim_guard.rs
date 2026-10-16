@@ -126,7 +126,11 @@ impl GuardKey {
                 (STANDARD.encode(mac.finalize().into_bytes()), "1")
             }
         };
-        let payload = ClientData { ts_sign: &material.data.ts_sign, req_content: "ticket,path,timestamp", req_sign: &signature, timestamp };
+        let t_trust = match mode {
+            GuardMode::Ecdsa => Some(1),
+            GuardMode::Hmac { .. } => None,
+        };
+        let payload = ClientData { ts_sign: &material.data.ts_sign, req_content: "ticket,path,timestamp", req_sign: &signature, timestamp, t_trust };
         let value = STANDARD.encode(serde_json::to_vec(&payload).context("GUARD_ENCODE_FAILED")?);
         let mut headers = HeaderMap::new();
         for (name, text) in [("bd-ticket-guard-ree-public-key", material.public.as_str()), ("bd-ticket-guard-web-version", if material.data.ts_sign.starts_with("ts.1") { "1" } else { "2" }), ("bd-ticket-guard-web-sign-type", sign_type), ("bd-ticket-guard-version", "2"), ("bd-ticket-guard-client-data", value.as_str())] {
@@ -148,7 +152,14 @@ pub struct ServerMaterial {
     pub log_id: Option<String>,
 }
 #[derive(Serialize)]
-struct ClientData<'a> { ts_sign: &'a str, req_content: &'a str, req_sign: &'a str, timestamp: i64 }
+struct ClientData<'a> {
+    ts_sign: &'a str,
+    req_content: &'a str,
+    req_sign: &'a str,
+    timestamp: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    t_trust: Option<u8>,
+}
 #[derive(Clone, Debug)]
 pub struct BoundGuardMaterial { pub data: ServerMaterial, pub uid: u64, pub session_hash: String, pub acquired_at: i64, pub public: String }
 impl BoundGuardMaterial {

@@ -990,11 +990,17 @@ impl SparkEngine {
     pub async fn heartbeat_all_active_accounts(&self) -> Result<()> {
         let accounts = db::list_accounts(&self.pool).await?;
         let sync_profiles = claim_profile_sync();
+        let now = Utc::now();
         for account in accounts {
             if account.status != "ACTIVE" {
                 continue;
             }
-            if !self.check_account_cookie(&account, true).await.unwrap_or(false) { continue; }
+            // 防打扰退避机制：若账号在最近 10 分钟（600 秒）内曾被前台手动操作或检测过，后台巡检严格保持静默，绝不发送失败告警
+            let recently_checked = account.last_checked_at
+                .and_then(|at| now.signed_duration_since(at).num_seconds().try_into().ok())
+                .is_some_and(|secs: i64| (0..=600).contains(&secs));
+            let notify = !recently_checked;
+            if !self.check_account_cookie(&account, notify).await.unwrap_or(false) { continue; }
             if !sync_profiles {
                 continue;
             }
