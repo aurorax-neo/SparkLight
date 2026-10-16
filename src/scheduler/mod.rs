@@ -261,7 +261,9 @@ impl SparkEngine {
     }
 
     /// 检查账号并保存已观察到的 Cookie 更新；不据此判定会话延寿。
-    pub async fn check_account_cookie(&self, account: &Account) -> Result<bool> {
+    /// `notify_on_failure`: 是否在检测失败（失效/安全验证/解密异常）时向 Bark 发送推送告警。
+    /// 前台手动操作（手动点击检测有效性、更新保存账号、手动触发等）必须设为 false，确保静默测试；后台定时任务与巡检设为 true。
+    pub async fn check_account_cookie(&self, account: &Account, notify_on_failure: bool) -> Result<bool> {
         let plaintext_cookie = match self.secret_box.decrypt(&account.encrypted_cookie) {
             Ok(bytes) => match String::from_utf8(bytes) {
                 Ok(s) => s,
@@ -269,7 +271,9 @@ impl SparkEngine {
                     let err_msg = "Cookie 解密后不是有效的 UTF-8 文本";
                     self.record_log(&account.id, &account.alias, None, None, "CHECK_COOKIE", "FAILED", err_msg).await.ok();
                     db::update_account_status(&self.pool, &account.id, "EXPIRED", Utc::now()).await?;
-                    self.notifier.send_cookie_expired_alert(&account.alias, account.nickname.as_deref(), err_msg, account.bark_key_override.as_deref()).await.ok();
+                    if notify_on_failure {
+                        self.notifier.send_cookie_expired_alert(&account.alias, account.nickname.as_deref(), err_msg, account.bark_key_override.as_deref()).await.ok();
+                    }
                     return Ok(false);
                 }
             },
@@ -277,7 +281,9 @@ impl SparkEngine {
                 let err_msg = "Cookie 解密失败（错误详情已省略）";
                 self.record_log(&account.id, &account.alias, None, None, "CHECK_COOKIE", "FAILED", &err_msg).await.ok();
                 db::update_account_status(&self.pool, &account.id, "EXPIRED", Utc::now()).await?;
-                self.notifier.send_cookie_expired_alert(&account.alias, account.nickname.as_deref(), &err_msg, account.bark_key_override.as_deref()).await.ok();
+                if notify_on_failure {
+                    self.notifier.send_cookie_expired_alert(&account.alias, account.nickname.as_deref(), err_msg, account.bark_key_override.as_deref()).await.ok();
+                }
                 return Ok(false);
             }
         };
@@ -338,13 +344,17 @@ impl SparkEngine {
             crate::douyin::types::CheckCookieResult::Expired(reason) => {
                 db::update_account_status(&self.pool, &account.id, "EXPIRED", Utc::now()).await?;
                 self.record_log(&account.id, &account.alias, None, None, "CHECK_COOKIE", "FAILED", "Cookie 已失效，已停止账号任务").await.ok();
-                self.notifier.send_cookie_expired_alert(&account.alias, account.nickname.as_deref(), &reason, account.bark_key_override.as_deref()).await.ok();
+                if notify_on_failure {
+                    self.notifier.send_cookie_expired_alert(&account.alias, account.nickname.as_deref(), &reason, account.bark_key_override.as_deref()).await.ok();
+                }
                 Ok(false)
             }
             crate::douyin::types::CheckCookieResult::NeedVerify(reason) => {
                 db::update_account_status(&self.pool, &account.id, "EXPIRED", Utc::now()).await?;
                 self.record_log(&account.id, &account.alias, None, None, "CHECK_COOKIE", "FAILED", "当前账号需要安全验证，已停止账号任务").await.ok();
-                self.notifier.send_cookie_expired_alert(&account.alias, account.nickname.as_deref(), &format!("需要安全验证: {reason}"), account.bark_key_override.as_deref()).await.ok();
+                if notify_on_failure {
+                    self.notifier.send_cookie_expired_alert(&account.alias, account.nickname.as_deref(), &format!("需要安全验证: {reason}"), account.bark_key_override.as_deref()).await.ok();
+                }
                 Ok(false)
             }
             result @ crate::douyin::types::CheckCookieResult::NetworkError(_) => {
@@ -440,7 +450,7 @@ impl SparkEngine {
             bail!("账号已被禁用");
         }
 
-        let is_valid = self.check_account_cookie(&account).await?;
+        let is_valid = self.check_account_cookie(account, !force_resend).await?;
         if !is_valid {
             let mut summary = ExecutionSummary::stopped(account, ExecutionDiagnostic::SessionUnconfirmed);
             summary.cookie_status = db::get_account(&self.pool, account_id).await?.context("账号不存在")?.status;
@@ -618,17 +628,19 @@ impl SparkEngine {
                     &fail_log_msg,
                 ).await.ok();
 
-                // Send Bark notification upon final failure
-                let alert_body = format!(
-                    "对好友「{}」自动续火花尝试 {} 次后失败！\n原因: {}",
-                    target.target_nickname, attempt, result.message
-                );
-                self.notifier.send_notification(
-                    account.bark_key_override.as_deref(),
-                    "【抖音火花助手】续火花最终失败告警",
-                    &alert_body,
-                    None,
-                ).await.ok();
+                // 手动测试操作（force_resend == true）直接在网页前端提示结果，严禁向 Bark 发送推送通知打扰用户
+                if !force_resend {
+                    let alert_body = format!(
+                        "对好友「{}」自动续火花尝试 {} 次后失败！\n原因: {}",
+                        target.target_nickname, attempt, result.message
+                    );
+                    self.notifier.send_notification(
+                        account.bark_key_override.as_deref(),
+                        "【抖音火花助手】续火花最终失败告警",
+                        &alert_body,
+                        None,
+                    ).await.ok();
+                }
             }
             if result.is_fatal_failure() || client.sending_blocked() || postcheck.is_err() {
                 stopped = true;
@@ -980,7 +992,7 @@ impl SparkEngine {
             if account.status != "ACTIVE" {
                 continue;
             }
-            if !self.check_account_cookie(&account).await.unwrap_or(false) { continue; }
+            if !self.check_account_cookie(&account, true).await.unwrap_or(false) { continue; }
             if !sync_profiles {
                 continue;
             }
@@ -1314,5 +1326,43 @@ mod diagnostic_tests {
             assert!(!result.success);assert!(result.message.starts_with("PCIM_INIT_DAY_CLAIM:"));
             let count:i64=sqlx::query_scalar("SELECT count(*) FROM spark_logs").fetch_one(&engine.pool).await.unwrap();assert_eq!(count,0);
         }
+    }
+
+    #[tokio::test]
+    async fn check_account_cookie_respects_notify_on_failure() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let pool = db::init_pool("sqlite::memory:").await.unwrap();
+        let secret = SecretBox::new(&[19; 32]);
+        let notifier = BarkNotifier::new(format!("http://127.0.0.1:{port}"), Some("test-key".into()));
+        let engine = SparkEngine::new(pool, secret, notifier, "08:00".into(), 0, 0, 5);
+
+        let account = Account {
+            id: "bad-cookie-account".into(),
+            alias: "测试账号".into(),
+            sec_uid: None,
+            uid: Some("12345".into()),
+            nickname: None,
+            avatar_url: None,
+            encrypted_cookie: vec![0, 1, 2], // 错误的加密数据，解密必失败
+            status: "ACTIVE".into(),
+            bark_key_override: None,
+            last_checked_at: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        db::insert_account(&engine.pool, &account).await.unwrap();
+
+        // 1. 静默检测（notify_on_failure = false）：必须不向 Bark 发送任何网络请求
+        let is_valid = engine.check_account_cookie(&account, false).await.unwrap();
+        assert!(!is_valid);
+        let accept_result = tokio::time::timeout(Duration::from_millis(100), listener.accept()).await;
+        assert!(accept_result.is_err(), "静默检测严禁向 Bark 发送请求");
+
+        // 2. 后台巡检/告警模式（notify_on_failure = true）：必须向 Bark 触发告警
+        let is_valid = engine.check_account_cookie(&account, true).await.unwrap();
+        assert!(!is_valid);
+        let accept_result = tokio::time::timeout(Duration::from_secs(1), listener.accept()).await;
+        assert!(accept_result.is_ok(), "后台检测失败时应向 Bark 发送告警");
     }
 }

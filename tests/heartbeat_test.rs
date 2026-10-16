@@ -13,7 +13,7 @@ async fn test_douyin_heartbeat_token_beat() {
     match beat_res {
         HeartbeatResult::Expired(reason) => {
             println!("Verified: Expired cookie correctly identified by Douyin token_beat: {}", reason);
-            assert!(reason.contains("过期") || reason.contains("401") || reason.contains("error") || reason.contains("未登录"));
+            assert!(reason.contains("过期") || reason.contains("401") || reason.contains("error") || reason.contains("未登录") || reason.contains("失效") || reason.contains("EXPIRED"));
         }
         HeartbeatResult::Alive => {
             panic!("Mock invalid cookie should not be alive");

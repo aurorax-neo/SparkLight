@@ -392,7 +392,7 @@ impl DouyinClient {
         if result.is_err() && stage != "DAY_CLAIM" { self.send_blocked.store(true,Ordering::Relaxed); }
         match result {
             Ok(id) => SendSparkResult {success:true,message:format!("续火消息已确认送达，消息ID: {id}"),spark_days:None,raw_response:Some(format!("MsgID: {id}"))},
-            Err(_) => SendSparkResult::failure(&format!("PCIM_INIT_{stage}: {}；禁止发送重试", match stage {
+            Err(e) => SendSparkResult::failure(&format!("PCIM_INIT_{stage}: {} [原因: {:#}]；禁止发送重试", match stage {
                 "DAY_CLAIM" => "当日已有发送占用，未再次提交；UNKNOWN 须保持未知",
                 "TICKET" => "当前账号的目标会话票据未确认，未提交",
                 "HISTORY_PRECHECK" => "今日历史未确认完整或今日已发送，未提交",
@@ -403,7 +403,7 @@ impl DouyinClient {
                 "HISTORY_POSTCHECK" => "回执已通过，但精确消息历史未确认，保留 UNKNOWN",
                 "ACCEPT_CAS" => "回执和历史已通过，但确认状态保存失败，禁止重发",
                 _ => "发送绑定或请求构建未通过，未提交",
-            })), 
+            }, e)),
         }
     }
 }

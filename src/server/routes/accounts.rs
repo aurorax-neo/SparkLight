@@ -281,7 +281,8 @@ pub async fn update_account(
             }
 
             let updated = db::get_account(&state.pool, &id).await.unwrap_or(Some(existing)).unwrap();
-            state.engine.check_account_cookie(&updated).await.ok();
+            // 手动保存/更新账号，静默检测，不向 Bark 发送告警通知
+            state.engine.check_account_cookie(&updated, false).await.ok();
         }
     }
 
@@ -312,7 +313,8 @@ pub async fn check_account(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"code": 500, "message": e.to_string()}))))?
         .ok_or_else(|| (StatusCode::NOT_FOUND, Json(json!({"code": 404, "message": "账号不存在"}))))?;
 
-    let is_valid = state.engine.check_account_cookie(&account).await
+    // 前台手动点击检测有效性为主动测试行为，结果直接在网页前端提示，严禁向 Bark 发送推送通知
+    let is_valid = state.engine.check_account_cookie(&account, false).await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"code": 500, "message": e.to_string()}))))?;
 
     let latest = db::get_account(&state.pool, &id).await.unwrap_or(Some(account)).unwrap();
