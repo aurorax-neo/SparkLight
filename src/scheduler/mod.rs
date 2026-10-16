@@ -883,7 +883,7 @@ impl SparkEngine {
             let stored = String::from_utf8(self.secret_box.decrypt(&current.encrypted_cookie)?)?;
             anyhow::ensure!(current.status=="ACTIVE" && current.uid==account.uid
                 && (stored==original || stored==client.get_current_cookie()),ExecutionDiagnostic::SessionUnconfirmed);
-            client.configure_pcim_initial_force(self.pool.clone(),current.encrypted_cookie,account,target,force)
+            client.configure_pcim_initial_force(self.pool.clone(),self.secret_box.clone(),current.encrypted_cookie,account,target,force)
         }.await;
         result.map_err(|error| {
             let diagnostic = error.downcast_ref::<ExecutionDiagnostic>().copied()

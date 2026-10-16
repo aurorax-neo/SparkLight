@@ -241,6 +241,7 @@ pub(crate) fn beijing_day() -> chrono::NaiveDate {
 #[derive(Clone)]
 pub(crate) struct InitialBinding {
     pool: sqlx::SqlitePool,
+    secret_box: crate::crypto::SecretBox,
     encrypted_cookie: Vec<u8>,
     started: Arc<AtomicBool>,
     account_id: String,
@@ -254,9 +255,15 @@ pub(crate) struct InitialBinding {
     pub(crate) force: bool,
 }
 impl InitialBinding {
-    fn new(pool:sqlx::SqlitePool, encrypted_cookie:Vec<u8>, account:&crate::model::Account, target:&crate::model::SparkTarget, force: bool)->Result<Self> {
+    fn new(pool:sqlx::SqlitePool, secret_box: crate::crypto::SecretBox, encrypted_cookie:Vec<u8>, account:&crate::model::Account, target:&crate::model::SparkTarget, force: bool)->Result<Self> {
         let (uid,cid)=target_binding(account,target,force)?;
-        Ok(Self {pool,encrypted_cookie,started:Arc::new(AtomicBool::new(false)),account_id:account.id.clone(),uid,target_id:target.id.clone(),cid,kind:target.conversation_type,peer:target.target_uid.clone(),target_sec_uid:target.target_sec_uid.clone(),template:target.message_template.clone(),force})
+        Ok(Self {pool,secret_box,encrypted_cookie,started:Arc::new(AtomicBool::new(false)),account_id:account.id.clone(),uid,target_id:target.id.clone(),cid,kind:target.conversation_type,peer:target.target_uid.clone(),target_sec_uid:target.target_sec_uid.clone(),template:target.message_template.clone(),force})
+    }
+    pub(crate) async fn persist_web_context(&self, context: &crate::douyin::im_auth::WebSessionContext) -> Result<()> {
+        let encrypted = self.secret_box.encrypt(&serde_json::to_vec(context)?)?;
+        sqlx::query("INSERT INTO account_web_contexts(account_id,encrypted_context) VALUES(?1,?2) ON CONFLICT(account_id) DO UPDATE SET encrypted_context=excluded.encrypted_context")
+            .bind(&self.account_id).bind(encrypted).execute(&self.pool).await?;
+        Ok(())
     }
     async fn has_day_claim(&self, day: chrono::NaiveDate) -> Result<bool> {
         Ok(sqlx::query_scalar::<_,i64>("SELECT COUNT(*) FROM im_send_attempts WHERE account_id=?1 AND conversation_id=?2 AND beijing_day=?3")
@@ -307,15 +314,15 @@ impl InitialSubmission<'_> {
 }
 
 impl DouyinClient {
-    pub(crate) fn configure_pcim_initial(&self, pool: sqlx::SqlitePool, encrypted_cookie: Vec<u8>, account:&crate::model::Account, target:&crate::model::SparkTarget) -> Result<()> {
+    pub(crate) fn configure_pcim_initial(&self, pool: sqlx::SqlitePool, secret_box: crate::crypto::SecretBox, encrypted_cookie: Vec<u8>, account:&crate::model::Account, target:&crate::model::SparkTarget) -> Result<()> {
         self.clear_send_credential();
         anyhow::ensure!(!self.sending_blocked(),"PCIM_INIT_CLIENT_STOPPED");
-        self.configure_pcim_initial_force(pool,encrypted_cookie,account,target,false)
+        self.configure_pcim_initial_force(pool,secret_box,encrypted_cookie,account,target,false)
     }
-    pub(crate) fn configure_pcim_initial_force(&self, pool: sqlx::SqlitePool, encrypted_cookie: Vec<u8>, account:&crate::model::Account, target:&crate::model::SparkTarget, force: bool) -> Result<()> {
+    pub(crate) fn configure_pcim_initial_force(&self, pool: sqlx::SqlitePool, secret_box: crate::crypto::SecretBox, encrypted_cookie: Vec<u8>, account:&crate::model::Account, target:&crate::model::SparkTarget, force: bool) -> Result<()> {
         self.clear_send_credential();
         anyhow::ensure!(!self.sending_blocked(),"PCIM_INIT_CLIENT_STOPPED");
-        let binding = InitialBinding::new(pool,encrypted_cookie,account,target,force)?;
+        let binding = InitialBinding::new(pool,secret_box,encrypted_cookie,account,target,force)?;
         *self.pcim_initial.lock().unwrap() = Some(binding);
         Ok(())
     }
@@ -371,9 +378,15 @@ impl DouyinClient {
                 }
             };
             if let Some(new_mat) = auth.key().bind_response_headers(&headers, binding.uid, &self.get_current_cookie(), chrono::Utc::now().timestamp())? {
-                if let Some(mut ctx) = self.web_context.lock().unwrap().clone() {
+                let existing_ctx = self.web_context.lock().unwrap().clone();
+                if let Some(mut ctx) = existing_ctx {
                     ctx.set_guard_material(&new_mat)?;
-                    self.set_web_context(ctx)?;
+                    self.set_web_context(ctx.clone())?;
+                    if let Err(e) = binding.persist_web_context(&ctx).await {
+                        tracing::warn!(account_id=%binding.account_id, err=%format!("{:#}", e), "自动持久化轮转票据失败");
+                    } else {
+                        tracing::info!(account_id=%binding.account_id, "PCIM Guard 票据随发信响应已自动无感轮转并持久化到 SQLite 数据库");
+                    }
                 }
             }
             // 严格ACK通过才接受普通Cookie更新；绝不导入Guard签名或证书。
@@ -446,7 +459,7 @@ mod production_gate_tests {
         sqlx::query("INSERT INTO accounts(id,alias,uid,encrypted_cookie,status,created_at,updated_at) VALUES(?1,'fixture','99191692311',X'01','ACTIVE','fixture','fixture')").bind(ACCOUNT).execute(&pool).await.unwrap();
         sqlx::query("INSERT INTO spark_targets(id,account_id,target_sec_uid,target_uid,target_nickname,message_template,created_at,updated_at) VALUES(?1,?2,'fixture','55696816245','fixture','🔥','fixture','fixture')").bind(TARGET).bind(ACCOUNT).execute(&pool).await.unwrap();
         let a=crate::db::get_account(&pool,ACCOUNT).await.unwrap().unwrap();let t=crate::db::get_target(&pool,TARGET).await.unwrap().unwrap();
-        InitialBinding::new(pool,vec![1],&a,&t,false).unwrap()
+        InitialBinding::new(pool,crate::crypto::SecretBox::new(&[1;32]),vec![1],&a,&t,false).unwrap()
     }
     #[tokio::test]
     async fn concurrent_day_claim_and_outcome_cas_are_single_winner() {
@@ -483,7 +496,7 @@ mod queued_gate_tests {
             client.set_web_context(context.clone()).unwrap();
             let ticket=ConversationTicket {uid:99191692311,conversation_id:CID.into(),conversation_type:1,short_id:123,ticket:"offline-ticket".into(),context};
             client.send_history.lock().unwrap().insert(CID.into(),(99191692311,1,beijing_day(),false));
-            let binding=InitialBinding {pool:pool.clone(),encrypted_cookie:vec![1],started:Arc::new(AtomicBool::new(true)),account_id:ACCOUNT.into(),uid:99191692311,target_id:TARGET.into(),cid:CID.into(),kind:1,peer:Some("55696816245".into()),target_sec_uid:"fixture".into(),template:"🔥".into(),force:false};
+            let binding=InitialBinding {pool:pool.clone(),secret_box:crate::crypto::SecretBox::new(&[1;32]),encrypted_cookie:vec![1],started:Arc::new(AtomicBool::new(true)),account_id:ACCOUNT.into(),uid:99191692311,target_id:TARGET.into(),cid:CID.into(),kind:1,peer:Some("55696816245".into()),target_sec_uid:"fixture".into(),template:"🔥".into(),force:false};
             let key=GuardKey::generate();
             let data=serde_json::to_vec(&serde_json::json!({"ticket":"offline-ticket","ts_sign":"ts.2.test","client_cert":format!("pub.{}",key.public_key_base64())})).unwrap();
             let material=key.bind_response(&data,99191692311,&client.get_current_cookie(),chrono::Utc::now().timestamp()).unwrap();
@@ -536,7 +549,7 @@ mod dynamic_gate_tests {
             sqlx::query("INSERT INTO spark_targets(id,account_id,target_sec_uid,conversation_id,conversation_type,target_nickname,message_template,created_at,updated_at) VALUES(?1,?1,'group','998877',2,'offline','群消息',datetime('now'),datetime('now'))").bind(id).execute(&pool).await.unwrap();
         }
         let a=crate::db::get_account(&pool,"a").await.unwrap().unwrap();let t=crate::db::get_target(&pool,"a").await.unwrap().unwrap();
-        let binding=InitialBinding::new(pool.clone(),vec![1],&a,&t,false).unwrap();let day=beijing_day();
+        let binding=InitialBinding::new(pool.clone(),crate::crypto::SecretBox::new(&[1;32]),vec![1],&a,&t,false).unwrap();let day=beijing_day();
         for sql in ["UPDATE accounts SET encrypted_cookie=X'02' WHERE id='a'","UPDATE accounts SET status='DISABLED' WHERE id='a'","UPDATE accounts SET uid='999' WHERE id='a'","UPDATE spark_targets SET account_id='b' WHERE id='a'","UPDATE spark_targets SET conversation_id='112233' WHERE id='a'","UPDATE spark_targets SET is_enabled=0 WHERE id='a'","UPDATE spark_targets SET message_template='changed' WHERE id='a'","UPDATE spark_targets SET conversation_type=1 WHERE id='a'"] {
             sqlx::query(sql).execute(&pool).await.unwrap();assert!(binding.claim(&uuid::Uuid::new_v4().to_string(),day).await.is_err());
             sqlx::query("UPDATE accounts SET uid='777',status='ACTIVE',encrypted_cookie=X'01' WHERE id='a'").execute(&pool).await.unwrap();
@@ -544,7 +557,7 @@ mod dynamic_gate_tests {
         }
         let id1=uuid::Uuid::new_v4().to_string();let id2=uuid::Uuid::new_v4().to_string();let (one,two)=tokio::join!(binding.claim(&id1,day),binding.claim(&id2,day));assert_ne!(one.is_ok(),two.is_ok());
         let b=crate::db::get_account(&pool,"b").await.unwrap().unwrap();let t=crate::db::get_target(&pool,"b").await.unwrap().unwrap();
-        InitialBinding::new(pool.clone(),vec![1],&b,&t,false).unwrap().claim(&uuid::Uuid::new_v4().to_string(),day).await.unwrap();
+        InitialBinding::new(pool.clone(),crate::crypto::SecretBox::new(&[1;32]),vec![1],&b,&t,false).unwrap().claim(&uuid::Uuid::new_v4().to_string(),day).await.unwrap();
         let count:i64=sqlx::query_scalar("SELECT count(*) FROM im_send_attempts").fetch_one(&pool).await.unwrap();assert_eq!(count,2);
     }
 }

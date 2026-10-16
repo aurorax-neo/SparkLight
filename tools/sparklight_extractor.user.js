@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SparkLight 抖音凭证一键全自动提取助手
 // @namespace    https://sparklight.local/
-// @version      2.2.2
+// @version      2.2.3
 // @description  一键全自动提取抖音完整登录凭证（包含 HttpOnly Cookie 与 Guard 签名私钥/票据），100% 纯本地复制，免除手动抓包
 // @author       SparkLight
 // @match        https://*.douyin.com/*
@@ -184,88 +184,91 @@
 
     const fullCookieStr = Object.entries(cookieMap).map(([k, v]) => `${k}=${v}`).join('; ');
 
-    // 采集 Guard 密钥与票据材料
-    let guardPrivHex = '';
-    let guardServerData = '';
+    // 采集 Guard 密钥与票据材料（合并 localStorage 与 IndexedDB，严格选取 create_time 最新的有效材料）
+    const candidateKeys = [];
+    const candidateTickets = [];
 
-    try {
-      const cryptRaw = localStorage.getItem('security-sdk/s_sdk_crypt_sdk');
-      if (cryptRaw) {
-        const cryptObj = JSON.parse(JSON.parse(cryptRaw).data || '{}');
-        if (cryptObj.ec_privateKey) {
-          guardPrivHex = pemToScalarHex(cryptObj.ec_privateKey);
-        }
-      }
-    } catch (_) {}
-
-    try {
-      // 优先从活跃的 web_protect 获取最新票据，若不存在再回退到 login
-      const signProtect = localStorage.getItem('security-sdk/s_sdk_sign_data_key/web_protect');
-      const signLogin = localStorage.getItem('security-sdk/s_sdk_sign_data_key/login');
-
-      const parseTicketObj = (raw) => {
-        if (!raw) return null;
-        try {
-          let p = JSON.parse(raw);
-          if (p && typeof p === 'object' && p.data) {
-            p = typeof p.data === 'string' ? JSON.parse(p.data) : p.data;
-          } else if (typeof p === 'string') {
-            p = JSON.parse(p);
-          }
-          if (p && typeof p === 'object' && p.ticket && p.ts_sign && p.client_cert) {
-            return p;
-          }
-        } catch (_) {}
-        return null;
-      };
-
-      const protectTicket = parseTicketObj(signProtect);
-      const loginTicket = parseTicketObj(signLogin);
-      let chosenObj = protectTicket;
-      if (!chosenObj || (loginTicket && (loginTicket.create_time || 0) > (chosenObj.create_time || 0))) {
-        chosenObj = loginTicket || chosenObj;
-      }
-
-      if (chosenObj) {
-        guardServerData = JSON.stringify({
-          ticket: chosenObj.ticket,
-          ts_sign: chosenObj.ts_sign,
-          client_cert: chosenObj.client_cert,
-          log_id: chosenObj.log_id || '',
-          create_time: chosenObj.create_time || 0
-        });
-      }
-    } catch (_) {}
-
-    // 兜底：如果 localStorage 未读取到 Guard 私钥或票据，尝试从 IndexedDB (secure-store) 提取
-    if (!guardPrivHex || !guardServerData) {
+    const parseTicketCandidate = (raw) => {
+      if (!raw) return null;
       try {
-        const items = await readSecureStoreFromIndexedDB();
-        for (const item of items) {
-          if (!item) continue;
-          let parsed = null;
-          try {
-            parsed = typeof item === 'string' ? JSON.parse(item) : item;
-            if (parsed && typeof parsed.data === 'string') {
-              parsed = JSON.parse(parsed.data);
-            }
-          } catch (_) {}
-          if (!parsed) continue;
+        let p = typeof raw === 'string' ? JSON.parse(raw) : raw;
+        if (p && typeof p === 'object' && p.data) {
+          p = typeof p.data === 'string' ? JSON.parse(p.data) : p.data;
+        }
+        if (p && typeof p === 'object' && p.ticket && p.ts_sign && p.client_cert) {
+          return {
+            ticket: p.ticket,
+            ts_sign: p.ts_sign,
+            client_cert: p.client_cert,
+            log_id: p.log_id || '',
+            create_time: Number(p.create_time) || 0,
+          };
+        }
+      } catch (_) {}
+      return null;
+    };
 
-          if (!guardPrivHex && parsed.ec_privateKey) {
-            guardPrivHex = pemToScalarHex(parsed.ec_privateKey);
-          }
-          if (!guardServerData && parsed.ticket && parsed.ts_sign && parsed.client_cert) {
-            guardServerData = JSON.stringify({
-              ticket: parsed.ticket,
-              ts_sign: parsed.ts_sign,
-              client_cert: parsed.client_cert,
-              log_id: parsed.log_id || '',
-              create_time: parsed.create_time || 0
-            });
+    const parseKeyCandidate = (raw) => {
+      if (!raw) return null;
+      try {
+        let p = typeof raw === 'string' ? JSON.parse(raw) : raw;
+        if (p && typeof p === 'object' && p.data) {
+          p = typeof p.data === 'string' ? JSON.parse(p.data) : p.data;
+        }
+        if (p && typeof p === 'object' && p.ec_privateKey) {
+          const hex = pemToScalarHex(p.ec_privateKey);
+          if (hex) {
+            return {
+              privHex: hex,
+              pubPem: p.ec_publicKey || '',
+            };
           }
         }
       } catch (_) {}
+      return null;
+    };
+
+    // 1. 扫描 localStorage
+    try {
+      const cryptRaw = localStorage.getItem('security-sdk/s_sdk_crypt_sdk');
+      const k = parseKeyCandidate(cryptRaw);
+      if (k) candidateKeys.push(k);
+
+      const signProtect = localStorage.getItem('security-sdk/s_sdk_sign_data_key/web_protect');
+      const tProtect = parseTicketCandidate(signProtect);
+      if (tProtect) candidateTickets.push(tProtect);
+
+      const signLogin = localStorage.getItem('security-sdk/s_sdk_sign_data_key/login');
+      const tLogin = parseTicketCandidate(signLogin);
+      if (tLogin) candidateTickets.push(tLogin);
+    } catch (_) {}
+
+    // 2. 扫描 IndexedDB secure-store (cryptvalues)
+    try {
+      const idbItems = await readSecureStoreFromIndexedDB();
+      for (const item of idbItems) {
+        const k = parseKeyCandidate(item);
+        if (k) candidateKeys.push(k);
+        const t = parseTicketCandidate(item);
+        if (t) candidateTickets.push(t);
+      }
+    } catch (_) {}
+
+    // 按 create_time 降序排序，选取最新生成的票据，杜绝陈旧历史票据被误用
+    candidateTickets.sort((a, b) => b.create_time - a.create_time);
+    const bestTicket = candidateTickets[0] || null;
+
+    let guardPrivHex = candidateKeys[0]?.privHex || '';
+    let guardServerData = '';
+
+    if (bestTicket) {
+      guardServerData = JSON.stringify({
+        ticket: bestTicket.ticket,
+        ts_sign: bestTicket.ts_sign,
+        client_cert: bestTicket.client_cert,
+        log_id: bestTicket.log_id || '',
+        create_time: bestTicket.create_time || 0,
+      });
     }
 
     // 采集当前登录用户的标识与昵称

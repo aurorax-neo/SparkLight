@@ -97,7 +97,7 @@ async fn configure(c:&DouyinClient,pool:&sqlx::SqlitePool) {
         }
     }
     let a=crate::db::get_account(pool,ACCOUNT).await.unwrap().unwrap();let t=crate::db::get_target(pool,TARGET).await.unwrap().unwrap();
-    c.configure_pcim_initial(pool.clone(),vec![1],&a,&t).unwrap();
+    c.configure_pcim_initial(pool.clone(),crate::crypto::SecretBox::new(&[1;32]),vec![1],&a,&t).unwrap();
 }
 fn prefix()->Vec<Reply>{vec![(TOKEN,Ok(token())),(PROFILE,Ok(profile(UID))),(INFO,Ok(conversation_ticket_response(CID,b"public-real-ticket",true))),(PROFILE,Ok(profile(UID))),(HISTORY,Ok(history(None))),(PROFILE,Ok(profile(UID)))]}
 async fn run(c:&DouyinClient)->SendSparkResult{c.send_spark_message(Some(CID),1,"public",Some("55696816245"),"🔥").await}
@@ -164,7 +164,7 @@ async fn initial_today_history_consumes_nothing(){
 #[tokio::test]
 async fn initial_binding_accepts_dynamic_accounts_but_rejects_invalid_targets(){
     let pool=database().await;let a=crate::db::get_account(&pool,ACCOUNT).await.unwrap().unwrap();let t=crate::db::get_target(&pool,TARGET).await.unwrap().unwrap();
-    for case in 0..6 {let a=a.clone();let mut t=t.clone();match case {0=>t.account_id="other".into(),1=>t.target_uid=None,2=>t.conversation_type=3,3=>t.conversation_id=Some("other".into()),4=>t.message_template="".into(),_=>t.is_enabled=false};let c=client(&format!("invalid-{case}"));assert!(c.configure_pcim_initial(pool.clone(),vec![1],&a,&t).is_err());}
+    for case in 0..6 {let a=a.clone();let mut t=t.clone();match case {0=>t.account_id="other".into(),1=>t.target_uid=None,2=>t.conversation_type=3,3=>t.conversation_id=Some("other".into()),4=>t.message_template="".into(),_=>t.is_enabled=false};let c=client(&format!("invalid-{case}"));assert!(c.configure_pcim_initial(pool.clone(),crate::crypto::SecretBox::new(&[1;32]),vec![1],&a,&t).is_err());}
 }
 
 #[tokio::test]
@@ -231,7 +231,7 @@ async fn multiple_accounts_targets_and_groups_use_fresh_tickets_and_dynamic_hist
             let mut replies=if index==0 {vec![(TOKEN,Ok(token())),(PROFILE,Ok(profile(uid)))]}else{vec![]};
             replies.extend([(INFO,Ok(dynamic_ticket(&cid,kind,true))),(PROFILE,Ok(profile(uid))),(HISTORY,Ok(dynamic_history(uid,&cid,kind,&t.message_template,None))),(PROFILE,Ok(profile(uid))),(SEND,Ok(vec![]))]);init(replies);
             DYNAMIC.with(|s|*s.borrow_mut()=Some((uid,cid.clone(),kind,t.message_template.clone())));
-            c.configure_pcim_initial(pool.clone(),vec![1],&a,&t).unwrap();
+            c.configure_pcim_initial(pool.clone(),crate::crypto::SecretBox::new(&[1;32]),vec![1],&a,&t).unwrap();
             let result=c.send_spark_message(t.conversation_id.as_deref(),kind,&t.target_sec_uid,t.target_uid.as_deref(),&t.message_template).await;
             assert!(result.success,"uid={uid} target={index}: {}",result.message);assert!(!c.sending_blocked());
             assert_eq!(seen().iter().filter(|p|p.as_str()==SEND).count(),1);

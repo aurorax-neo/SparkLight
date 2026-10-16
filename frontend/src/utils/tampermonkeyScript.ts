@@ -1,7 +1,7 @@
 export const TAMPERMONKEY_SCRIPT: string = `// ==UserScript==
 // @name         SparkLight 抖音凭证一键全自动提取助手
 // @namespace    https://sparklight.local/
-// @version      2.2.1
+// @version      2.2.3
 // @description  一键全自动提取抖音完整登录凭证（包含 HttpOnly Cookie 与 Guard 签名私钥/票据），100% 纯本地复制，免除手动抓包
 // @author       SparkLight
 // @match        https://*.douyin.com/*
@@ -14,6 +14,7 @@ export const TAMPERMONKEY_SCRIPT: string = `// ==UserScript==
 (function () {
   'use strict';
 
+  // 1. 轻量解析 PKCS8 P-256 私钥 PEM 为 32 字节 Scalar Hex
   function pemToScalarHex(pem) {
     if (!pem || typeof pem !== 'string') return '';
     try {
@@ -34,6 +35,28 @@ export const TAMPERMONKEY_SCRIPT: string = `// ==UserScript==
     return '';
   }
 
+  // 1.1 从 IndexedDB secure-store 兜底读取 Guard 凭证
+  async function readSecureStoreFromIndexedDB() {
+    return new Promise((resolve) => {
+      try {
+        const req = indexedDB.open('secure-store');
+        req.onerror = () => resolve([]);
+        req.onsuccess = (e) => {
+          const db = e.target.result;
+          if (!db.objectStoreNames.contains('cryptvalues')) return resolve([]);
+          const tx = db.transaction('cryptvalues', 'readonly');
+          const store = tx.objectStore('cryptvalues');
+          const getAll = store.getAll();
+          getAll.onsuccess = () => resolve(getAll.result || []);
+          getAll.onerror = () => resolve([]);
+        };
+      } catch (_) {
+        resolve([]);
+      }
+    });
+  }
+
+  // 2. 页面浮动轻提示 Toast
   function showToast(message, isSuccess = true, duration = 3000) {
     const existing = document.getElementById('sl-extractor-toast');
     if (existing) existing.remove();
@@ -62,6 +85,7 @@ export const TAMPERMONKEY_SCRIPT: string = `// ==UserScript==
     }, duration);
   }
 
+  // 3. 多重策略提取全量 Cookies（深度捕获 HttpOnly 的 sessionid）
   async function fetchAllCookies() {
     const cookieMap = {};
 
@@ -73,7 +97,7 @@ export const TAMPERMONKEY_SCRIPT: string = `// ==UserScript==
           resolve(Array.isArray(list) ? list : []);
         }
       };
-      setTimeout(() => done([]), 800);
+      setTimeout(() => done([]), 800); // 800ms 防挂起
 
       try {
         if (typeof GM_cookie !== 'undefined' && GM_cookie.list) {
@@ -91,6 +115,7 @@ export const TAMPERMONKEY_SCRIPT: string = `// ==UserScript==
       }
     });
 
+    // 广覆盖检索匹配
     const attempts = await Promise.all([
       tryGmCookie({ url: 'https://www.douyin.com/' }),
       tryGmCookie({ url: window.location.href }),
@@ -107,6 +132,7 @@ export const TAMPERMONKEY_SCRIPT: string = `// ==UserScript==
       }
     }
 
+    // 合并 document.cookie
     if (document.cookie) {
       document.cookie.split(';').forEach((p) => {
         const idx = p.indexOf('=');
@@ -121,6 +147,7 @@ export const TAMPERMONKEY_SCRIPT: string = `// ==UserScript==
     return cookieMap;
   }
 
+  // 4. 解析 cURL 字符串中的 Cookie
   function parseCurlCookie(text) {
     if (!text || typeof text !== 'string') return null;
     const trimmed = text.trim();
@@ -131,10 +158,12 @@ export const TAMPERMONKEY_SCRIPT: string = `// ==UserScript==
     return null;
   }
 
+  // 5. 核心全量提取与写入剪贴板
   async function performExtraction() {
     const cookieMap = await fetchAllCookies();
     let hasSession = !!(cookieMap['sessionid'] || cookieMap['sessionid_ss'] || cookieMap['sid_tt']);
 
+    // 兜底：如果扩展限制未直接获取 sessionid，尝试检查剪贴板是否已有纯文本凭证
     if (!hasSession && navigator.clipboard && navigator.clipboard.readText) {
       try {
         const clip = await navigator.clipboard.readText();
@@ -155,57 +184,94 @@ export const TAMPERMONKEY_SCRIPT: string = `// ==UserScript==
 
     const fullCookieStr = Object.entries(cookieMap).map(([k, v]) => \`\${k}=\${v}\`).join('; ');
 
-    let guardPrivHex = '';
-    let guardServerData = '';
+    // 采集 Guard 密钥与票据材料（合并 localStorage 与 IndexedDB，严格选取 create_time 最新的有效材料）
+    const candidateKeys = [];
+    const candidateTickets = [];
 
+    const parseTicketCandidate = (raw) => {
+      if (!raw) return null;
+      try {
+        let p = typeof raw === 'string' ? JSON.parse(raw) : raw;
+        if (p && typeof p === 'object' && p.data) {
+          p = typeof p.data === 'string' ? JSON.parse(p.data) : p.data;
+        }
+        if (p && typeof p === 'object' && p.ticket && p.ts_sign && p.client_cert) {
+          return {
+            ticket: p.ticket,
+            ts_sign: p.ts_sign,
+            client_cert: p.client_cert,
+            log_id: p.log_id || '',
+            create_time: Number(p.create_time) || 0,
+          };
+        }
+      } catch (_) {}
+      return null;
+    };
+
+    const parseKeyCandidate = (raw) => {
+      if (!raw) return null;
+      try {
+        let p = typeof raw === 'string' ? JSON.parse(raw) : raw;
+        if (p && typeof p === 'object' && p.data) {
+          p = typeof p.data === 'string' ? JSON.parse(p.data) : p.data;
+        }
+        if (p && typeof p === 'object' && p.ec_privateKey) {
+          const hex = pemToScalarHex(p.ec_privateKey);
+          if (hex) {
+            return {
+              privHex: hex,
+              pubPem: p.ec_publicKey || '',
+            };
+          }
+        }
+      } catch (_) {}
+      return null;
+    };
+
+    // 1. 扫描 localStorage
     try {
       const cryptRaw = localStorage.getItem('security-sdk/s_sdk_crypt_sdk');
-      if (cryptRaw) {
-        const cryptObj = JSON.parse(JSON.parse(cryptRaw).data || '{}');
-        if (cryptObj.ec_privateKey) {
-          guardPrivHex = pemToScalarHex(cryptObj.ec_privateKey);
-        }
-      }
-    } catch (_) {}
+      const k = parseKeyCandidate(cryptRaw);
+      if (k) candidateKeys.push(k);
 
-    try {
       const signProtect = localStorage.getItem('security-sdk/s_sdk_sign_data_key/web_protect');
+      const tProtect = parseTicketCandidate(signProtect);
+      if (tProtect) candidateTickets.push(tProtect);
+
       const signLogin = localStorage.getItem('security-sdk/s_sdk_sign_data_key/login');
+      const tLogin = parseTicketCandidate(signLogin);
+      if (tLogin) candidateTickets.push(tLogin);
+    } catch (_) {}
 
-      const parseTicketObj = (raw) => {
-        if (!raw) return null;
-        try {
-          let p = JSON.parse(raw);
-          if (p && typeof p === 'object' && p.data) {
-            p = typeof p.data === 'string' ? JSON.parse(p.data) : p.data;
-          } else if (typeof p === 'string') {
-            p = JSON.parse(p);
-          }
-          if (p && typeof p === 'object' && p.ticket && p.ts_sign && p.client_cert) {
-            return p;
-          }
-        } catch (_) {}
-        return null;
-      };
-
-      const protectTicket = parseTicketObj(signProtect);
-      const loginTicket = parseTicketObj(signLogin);
-      let chosenObj = protectTicket;
-      if (!chosenObj || (loginTicket && (loginTicket.create_time || 0) > (chosenObj.create_time || 0))) {
-        chosenObj = loginTicket || chosenObj;
-      }
-
-      if (chosenObj) {
-        guardServerData = JSON.stringify({
-          ticket: chosenObj.ticket,
-          ts_sign: chosenObj.ts_sign,
-          client_cert: chosenObj.client_cert,
-          log_id: chosenObj.log_id || '',
-          create_time: chosenObj.create_time || 0
-        });
+    // 2. 扫描 IndexedDB secure-store (cryptvalues)
+    try {
+      const idbItems = await readSecureStoreFromIndexedDB();
+      for (const item of idbItems) {
+        const k = parseKeyCandidate(item);
+        if (k) candidateKeys.push(k);
+        const t = parseTicketCandidate(item);
+        if (t) candidateTickets.push(t);
       }
     } catch (_) {}
 
+    // 按 create_time 降序排序，选取最新生成的票据，杜绝陈旧历史票据被误用
+    candidateTickets.sort((a, b) => b.create_time - a.create_time);
+    const bestTicket = candidateTickets[0] || null;
+
+    let guardPrivHex = candidateKeys[0]?.privHex || '';
+    let guardServerData = '';
+
+    if (bestTicket) {
+      guardServerData = JSON.stringify({
+        ticket: bestTicket.ticket,
+        ts_sign: bestTicket.ts_sign,
+        client_cert: bestTicket.client_cert,
+        log_id: bestTicket.log_id || '',
+        create_time: bestTicket.create_time || 0,
+      });
+    }
+
+    // 采集当前登录用户的标识与昵称
     let userInfo = { uid: '', nickname: '' };
     try {
       const res = await fetch('https://www.douyin.com/aweme/v1/web/user/profile/self/?aid=6383');
@@ -232,6 +298,7 @@ export const TAMPERMONKEY_SCRIPT: string = `// ==UserScript==
       return false;
     }
 
+    // 组装全量凭证结构
     const payload = {
       type: 'sparklight_credential',
       version: '2.2.0',
@@ -253,10 +320,11 @@ export const TAMPERMONKEY_SCRIPT: string = `// ==UserScript==
       prompt('请按 Cmd+C (或 Ctrl+C) 复制凭证：', textToCopy);
     }
 
-    showToast(\`✅ 已成功复制「\${userInfo.nickname || '抖音账号'}\」全量凭证（含 Cookie 与 Guard 私钥）！请前往 SparkLight 控制台直接粘贴。\`);
+    showToast(\`✅ 已成功复制「\${userInfo.nickname || '抖音账号'}」全量凭证（含 Cookie 与 Guard 私钥）！请前往 SparkLight 控制台直接粘贴。\`);
     return true;
   }
 
+  // 6. 挂载页面右下角极简常驻胶囊按钮
   function mountCapsule() {
     if (document.getElementById('sl-extractor-capsule')) return;
 
