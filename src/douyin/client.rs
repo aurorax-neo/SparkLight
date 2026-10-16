@@ -68,23 +68,39 @@ pub fn extract_clean_cookie(raw: &str) -> String {
     }
     text.replace('\n', "").replace('\r', "")
 }
-/// 解析用户输入：可能是包含 Cookie 与 Guard 密钥材料的完整 JSON，或者纯 Cookie / cURL 命令
-pub fn parse_credential_payload(raw: &str) -> (String, Option<(String, String)>) {
+#[derive(Debug, Clone, Default)]
+pub struct ParsedCredential {
+    pub cookie: String,
+    pub uid: Option<String>,
+    pub nickname: Option<String>,
+    pub guard: Option<(String, String)>,
+}
+
+/// 全量解析油猴 2.2.0 或用户输入凭证对象
+pub fn parse_credential_full(raw: &str) -> ParsedCredential {
     let trimmed = raw.trim();
     if trimmed.starts_with('{') {
         if let Ok(val) = serde_json::from_str::<serde_json::Value>(trimmed) {
             let cookie = val.get("cookie").and_then(|v| v.as_str())
                 .map(|s| extract_clean_cookie(s))
                 .unwrap_or_else(|| extract_clean_cookie(trimmed));
+            let uid = val.get("uid").and_then(|v| v.as_str())
+                .filter(|s| !s.trim().is_empty())
+                .map(str::to_string);
+            let nickname = val.get("nickname").and_then(|v| v.as_str())
+                .filter(|s| !s.trim().is_empty())
+                .map(str::to_string);
             let priv_key = val.get("guard_private_key").and_then(|v| v.as_str())
                 .or_else(|| val.pointer("/guard/private_key").and_then(|v| v.as_str()))
                 .or_else(|| val.pointer("/guard/private_key_hex").and_then(|v| v.as_str()))
+                .filter(|s| !s.trim().is_empty())
                 .map(str::to_string);
             let srv_data = val.get("guard_server_data")
                 .or_else(|| val.pointer("/guard/server_data"))
                 .and_then(|v| {
                     if let Some(s) = v.as_str() {
                         let trimmed = s.trim();
+                        if trimmed.is_empty() { return None; }
                         if trimmed.starts_with('"') && trimmed.ends_with('"') {
                             if let Ok(unquoted) = serde_json::from_str::<String>(trimmed) {
                                 return Some(unquoted);
@@ -97,13 +113,25 @@ pub fn parse_credential_payload(raw: &str) -> (String, Option<(String, String)>)
                         None
                     }
                 });
-            if let (Some(k), Some(d)) = (priv_key, srv_data) {
-                return (cookie, Some((k, d)));
-            }
-            return (cookie, None);
+            let guard = match (priv_key, srv_data) {
+                (Some(k), Some(d)) => Some((k, d)),
+                _ => None,
+            };
+            return ParsedCredential { cookie, uid, nickname, guard };
         }
     }
-    (extract_clean_cookie(trimmed), None)
+    ParsedCredential {
+        cookie: extract_clean_cookie(trimmed),
+        uid: None,
+        nickname: None,
+        guard: None,
+    }
+}
+
+/// 解析用户输入：可能是包含 Cookie 与 Guard 密钥材料的完整 JSON，或者纯 Cookie
+pub fn parse_credential_payload(raw: &str) -> (String, Option<(String, String)>) {
+    let p = parse_credential_full(raw);
+    (p.cookie, p.guard)
 }
 impl DouyinClient {
     pub fn new(cookie: &str, account_alias: &str) -> Result<Self> {
@@ -203,10 +231,15 @@ impl DouyinClient {
             return CheckCookieResult::Expired("当前会话未返回有效发送身份".to_string());
         }
         let uid=uid.unwrap();
-        // 只读 SESSION_AUTH 不应依赖先捕获一次发送。
-        if self.im_history_status(Some(&uid.to_string())).0 != "AVAILABLE" {
-            match super::im_auth::WebSessionContext::from_session(uid,&self.get_current_cookie(),DEFAULT_USER_AGENT) {
-                Ok(context) => { if self.set_web_context(context).is_err() { return CheckCookieResult::NetworkError("IM 只读会话初始化失败".into()); } },
+        // 只读 SESSION_AUTH：仅在尚未初始化会话上下文时建立初始骨架；已有上下文严禁重建冲刷
+        let needs_init = self.web_context.lock().unwrap().is_none();
+        if needs_init {
+            match super::im_auth::WebSessionContext::from_session(uid, &self.get_current_cookie(), DEFAULT_USER_AGENT) {
+                Ok(context) => {
+                    if self.set_web_context(context).is_err() {
+                        return CheckCookieResult::NetworkError("IM 只读会话初始化失败".into());
+                    }
+                }
                 Err(_) => return CheckCookieResult::NetworkError("IM 只读会话初始化失败".into()),
             }
         }
@@ -239,9 +272,13 @@ impl DouyinClient {
         Ok(())
     }
 
-    pub fn set_web_context(&self, context: super::im_auth::WebSessionContext) -> Result<()> {
+    pub fn set_web_context(&self, mut context: super::im_auth::WebSessionContext) -> Result<()> {
         context.validate_session(context.uid, &self.get_current_cookie())?;
-        *self.web_context.lock().unwrap() = Some(context);
+        let mut guard = self.web_context.lock().unwrap();
+        if let Some(old) = guard.as_ref() {
+            context.inherit_guard_materials(old);
+        }
+        *guard = Some(context);
         Ok(())
     }
 
@@ -317,8 +354,17 @@ impl DouyinClient {
     pub async fn persist_im_session(&self,pool: &sqlx::SqlitePool,secret: &crate::crypto::SecretBox,
         account_id: &str,original_encrypted_cookie: &[u8],expected_uid: Option<&str>) -> Result<()> {
         let uid=self.verified_sender_uid(expected_uid)?;
-        let context=self.web_context.lock().unwrap().clone().context("IM 上下文不存在")?;
+        let mut context=self.web_context.lock().unwrap().clone().context("IM 上下文不存在")?;
         context.validate_session(uid,&self.get_current_cookie())?;
+        if context.guard_secret_hex.is_none() || context.guard_server_data.is_none() {
+            if let Ok(Some(old_enc)) = sqlx::query_scalar::<_, Vec<u8>>("SELECT encrypted_context FROM account_web_contexts WHERE account_id=?1").bind(account_id).fetch_optional(pool).await {
+                if let Ok(old_plain) = secret.decrypt(&old_enc) {
+                    if let Ok(old_saved) = serde_json::from_slice::<super::im_auth::WebSessionContext>(&old_plain) {
+                        context.inherit_guard_materials(&old_saved);
+                    }
+                }
+            }
+        }
         let encrypted_cookie=secret.encrypt(self.get_current_cookie().as_bytes())?;
         let encrypted_context=secret.encrypt(&serde_json::to_vec(&context)?)?;
         let mut tx=pool.begin().await?;
@@ -333,11 +379,23 @@ impl DouyinClient {
 
     pub async fn persist_web_context(&self, pool: &sqlx::SqlitePool, secret: &crate::crypto::SecretBox, account_id: &str) -> Result<()> {
         let context=self.web_context.lock().unwrap().clone();
-        if let Some(context)=context {
-            if context.session_hash != super::im_auth::session_hash(&self.get_current_cookie())? { return Ok(()); }
-            let encrypted=secret.encrypt(&serde_json::to_vec(&context)?)?;
+        if let Some(mut ctx)=context {
+            if ctx.session_hash != super::im_auth::session_hash(&self.get_current_cookie())? { return Ok(()); }
+            if ctx.guard_secret_hex.is_none() || ctx.guard_server_data.is_none() {
+                if let Ok(Some(old_enc)) = sqlx::query_scalar::<_, Vec<u8>>("SELECT encrypted_context FROM account_web_contexts WHERE account_id=?1").bind(account_id).fetch_optional(pool).await {
+                    if let Ok(old_plain) = secret.decrypt(&old_enc) {
+                        if let Ok(old_saved) = serde_json::from_slice::<super::im_auth::WebSessionContext>(&old_plain) {
+                            ctx.inherit_guard_materials(&old_saved);
+                        }
+                    }
+                }
+            }
+            let encrypted=secret.encrypt(&serde_json::to_vec(&ctx)?)?;
             sqlx::query("INSERT INTO account_web_contexts(account_id,encrypted_context) VALUES(?1,?2) ON CONFLICT(account_id) DO UPDATE SET encrypted_context=excluded.encrypted_context")
                 .bind(account_id).bind(encrypted).execute(pool).await?;
+            if let Some(mem_ctx) = self.web_context.lock().unwrap().as_mut() {
+                mem_ctx.inherit_guard_materials(&ctx);
+            }
         }
         Ok(())
     }
@@ -363,8 +421,7 @@ impl DouyinClient {
         if im_identity_tests::active() {
             anyhow::bail!("OFFLINE_MOCK_NO_GUARD_BOUND");
         }
-        // 未建联时由发送链路走 Initial 握手自动在响应中绑定，严禁向敏感探测接口发起请求
-        anyhow::bail!("GUARD_NOT_YET_BOUND");
+        anyhow::bail!("当前账号尚未绑定有效的 Guard 签名票据材料，禁止发送未签名请求以防会话被踢下线");
     }
 
     /// 拉取 DTrait 中央公钥配置并缓存在 Web 上下文中。

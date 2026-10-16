@@ -138,6 +138,19 @@ impl WebSessionContext {
         self.dtrait_pk1_pem = Some(pem.to_owned());
         self.dtrait_version = Some(version.to_owned());
     }
+    pub fn inherit_guard_materials(&mut self, source: &WebSessionContext) {
+        if self.guard_secret_hex.is_none() && source.guard_secret_hex.is_some() {
+            self.guard_secret_hex = source.guard_secret_hex.clone();
+        }
+        if self.guard_server_data.is_none() && source.guard_server_data.is_some() {
+            self.guard_server_data = source.guard_server_data.clone();
+            self.guard_acquired_at = source.guard_acquired_at;
+        }
+        if self.dtrait_pk1_pem.is_none() && source.dtrait_pk1_pem.is_some() {
+            self.dtrait_pk1_pem = source.dtrait_pk1_pem.clone();
+            self.dtrait_version = source.dtrait_version.clone();
+        }
+    }
     pub fn validate_session(&self, uid: u64, cookie: &str) -> Result<()> {
         ensure!(self.uid == uid && self.session_hash == session_hash(cookie)?, "Web 上下文与当前账号或 Cookie 不符，禁止请求");
         ensure!(!self.user_agent.is_empty() && self.user_agent.len() <= 1024, "Web 浏览器身份无效");

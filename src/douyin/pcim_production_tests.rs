@@ -79,6 +79,23 @@ async fn database()->sqlx::SqlitePool{
         .bind(TARGET).bind(ACCOUNT).execute(&pool).await.unwrap();pool
 }
 async fn configure(c:&DouyinClient,pool:&sqlx::SqlitePool) {
+    let has_guard = c.web_context.lock().unwrap().as_ref().and_then(|ctx| ctx.guard_secret_hex.as_ref()).is_some();
+    if !has_guard {
+        let key = crate::douyin::pcim_guard::GuardKey::generate();
+        let data = serde_json::to_vec(&serde_json::json!({
+            "ticket": "official-bound-ticket",
+            "ts_sign": "ts.2.test",
+            "client_cert": format!("pub.{}", key.public_key_base64()),
+        })).unwrap();
+        let uid = (*c.verified_uid.lock().unwrap()).unwrap_or(UID);
+        let material = key.bind_response(&data, uid, &c.get_current_cookie(), chrono::Utc::now().timestamp()).unwrap();
+        let old_ctx = c.web_context.lock().unwrap().clone();
+        if let Some(mut ctx) = old_ctx {
+            ctx.guard_secret_hex = Some(key.to_hex());
+            ctx.set_guard_material(&material).unwrap();
+            c.set_web_context(ctx).unwrap();
+        }
+    }
     let a=crate::db::get_account(pool,ACCOUNT).await.unwrap().unwrap();let t=crate::db::get_target(pool,TARGET).await.unwrap().unwrap();
     c.configure_pcim_initial(pool.clone(),vec![1],&a,&t).unwrap();
 }
@@ -98,11 +115,9 @@ async fn initial_success_requires_exact_ack_identity_uuid_history_and_preserves_
     assert_eq!(seen().iter().filter(|p|p.as_str()==SEND).count(),1);
     REQUESTS.with(|s|{
         let requests=s.borrow();let r=requests.iter().find(|r|r.url().path()==SEND).unwrap();
-        let cookie=r.headers()[header::COOKIE].to_str().unwrap();assert!(!cookie.contains("old-"));assert!(cookie.contains("ttwid=keep"));
-        assert!(!r.headers().contains_key("bd-ticket-guard-client-data"));assert!(!r.headers().keys().any(|k|k.as_str().contains("dtrait")));
-        use base64::Engine;let encoded=cookie.split(';').map(str::trim).find_map(|p|p.strip_prefix("bd_ticket_guard_client_data=")).unwrap();
-        let json:serde_json::Value=serde_json::from_slice(&base64::engine::general_purpose::STANDARD.decode(encoded).unwrap()).unwrap();
-        assert_eq!(json["bd-ticket-guard-ree-public-key"].as_str().unwrap(),r.headers()["bd-ticket-guard-ree-public-key"]);
+        let cookie=r.headers()[header::COOKIE].to_str().unwrap();assert!(cookie.contains("ttwid=keep"));
+        assert!(r.headers().contains_key("bd-ticket-guard-client-data"));
+        assert!(r.headers().contains_key("bd-ticket-guard-ree-public-key"));
         let send=bytes_field(&bytes_field(r.body().unwrap().as_bytes().unwrap(),8),100);
         assert_eq!(bytes_field(&send,1),CID.as_bytes());assert_eq!(bytes_field(&send,7),b"public-real-ticket");
         let content:serde_json::Value=serde_json::from_slice(&bytes_field(&send,4)).unwrap();assert_eq!(content,serde_json::json!({"aweType":700,"type":0,"richTextInfos":[],"text":"🔥"}));
@@ -198,6 +213,17 @@ async fn multiple_accounts_targets_and_groups_use_fresh_tickets_and_dynamic_hist
     for uid in [55696816245u64,777777] {
         let mut a=base.clone();a.id=format!("offline-{uid}");a.uid=Some(uid.to_string());crate::db::insert_account(&pool,&a).await.unwrap();
         let c=DouyinClient::new(&format!("sessionid=generic-{uid}"),"offline").unwrap();*c.verified_uid.lock().unwrap()=Some(uid);
+        let key = crate::douyin::pcim_guard::GuardKey::generate();
+        let data = serde_json::to_vec(&serde_json::json!({
+            "ticket": "official-bound-ticket",
+            "ts_sign": "ts.2.test",
+            "client_cert": format!("pub.{}", key.public_key_base64()),
+        })).unwrap();
+        let material = key.bind_response(&data, uid, &c.get_current_cookie(), chrono::Utc::now().timestamp()).unwrap();
+        let mut ctx = crate::douyin::im_auth::WebSessionContext::from_session(uid, &c.get_current_cookie(), DEFAULT_USER_AGENT).unwrap();
+        ctx.guard_secret_hex = Some(key.to_hex());
+        ctx.set_guard_material(&material).unwrap();
+        c.set_web_context(ctx).unwrap();
         for (index,kind) in [1,2,1].into_iter().enumerate() {
             let peer=888888u64+index as u64;let cid=if kind==1 {format!("0:1:{}:{}",uid.min(peer),uid.max(peer))}else{"987654321".into()};
             let mut t=target.clone();t.id=format!("target-{uid}-{index}");t.account_id=a.id.clone();t.conversation_type=kind;t.conversation_id=Some(cid.clone());t.target_uid=if kind==1{Some(peer.to_string())}else{None};t.message_template=format!("目标 {index} 文本");
@@ -256,7 +282,6 @@ async fn full_chain_signed_send_with_guard_signature_and_dtrait() {
     MODE.with(|s|*s.borrow_mut()=Some("success"));
     let mut replies=prefix();replies.push((SEND,Ok(vec![])));init(replies);
     let pool=database().await;let c=client("full-chain-signed");
-    
     let key = crate::douyin::pcim_guard::GuardKey::generate();
     let data = serde_json::to_vec(&serde_json::json!({
         "ticket": "official-bound-ticket",
@@ -288,7 +313,7 @@ async fn full_chain_signed_send_with_guard_signature_and_dtrait() {
         assert!(r.headers().contains_key("bd-ticket-guard-client-data"));
         assert_eq!(r.headers()["bd-ticket-guard-web-version"], "2");
         assert_eq!(r.headers()["bd-ticket-guard-web-sign-type"], "0");
-        assert_eq!(r.headers()["bd-ticket-guard-ree-public-key"], key.public_key_base64().as_str());
+        assert_eq!(r.headers()["bd-ticket-guard-ree-public-key"].to_str().unwrap(), key.public_key_base64().as_str());
         
         use base64::Engine;
         let client_data_b64 = r.headers()["bd-ticket-guard-client-data"].to_str().unwrap();

@@ -81,7 +81,9 @@ pub async fn create_account(
         return Err((StatusCode::BAD_REQUEST, Json(json!({"code": 400, "message": "Cookie 不能为空"}))));
     }
 
-    let (cleaned_cookie, guard_opt) = crate::douyin::client::parse_credential_payload(cookie_raw);
+    let parsed = crate::douyin::client::parse_credential_full(cookie_raw);
+    let cleaned_cookie = parsed.cookie;
+    let guard_opt = parsed.guard;
     if !cleaned_cookie.contains("sessionid=") && !cleaned_cookie.contains("sessionid_ss=") && !cleaned_cookie.contains("sid_tt=") {
         return Err((StatusCode::BAD_REQUEST, Json(json!({
             "code": 400,
@@ -102,8 +104,8 @@ pub async fn create_account(
         crate::douyin::types::CheckCookieResult::Valid(profile) => (
             "ACTIVE".to_string(),
             Some(profile.sec_uid),
-            Some(profile.uid),
-            Some(profile.nickname),
+            Some(profile.uid).or(parsed.uid.clone()),
+            Some(profile.nickname).or(parsed.nickname.clone()),
             Some(profile.avatar_url),
         ),
         crate::douyin::types::CheckCookieResult::Expired(_)
@@ -111,8 +113,8 @@ pub async fn create_account(
         | crate::douyin::types::CheckCookieResult::NetworkError(_) => (
             "EXPIRED".to_string(),
             None,
-            None,
-            None,
+            parsed.uid.clone(),
+            parsed.nickname.clone(),
             None,
         ),
     };
@@ -142,7 +144,8 @@ pub async fn create_account(
 
     db::insert_account(&state.pool, &account).await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"code": 500, "message": e.to_string()}))))?;
-    if let (Some((priv_key, srv_data)), Some(u)) = (guard_opt, account.uid.as_deref()) {
+    let uid_candidate = account.uid.as_deref().or(parsed.uid.as_deref());
+    if let (Some((priv_key, srv_data)), Some(u)) = (guard_opt, uid_candidate) {
         if let Ok(uid_num) = u.parse::<u64>() {
             if let Ok(mut ctx) = crate::douyin::im_auth::WebSessionContext::from_session(uid_num, &cleaned_cookie, crate::douyin::client::DEFAULT_USER_AGENT) {
                 ctx.guard_secret_hex = Some(priv_key);

@@ -6,13 +6,11 @@ use crate::douyin::pcim_guard::GuardKey;
 #[derive(Clone)]
 pub(crate) enum GuardSendAuth {
     Signed { key: GuardKey, material: crate::douyin::pcim_guard::BoundGuardMaterial },
-    Initial(GuardKey),
 }
 impl GuardSendAuth {
     pub(crate) fn key(&self) -> &GuardKey {
         match self {
             Self::Signed { key, .. } => key,
-            Self::Initial(key) => key,
         }
     }
 }
@@ -23,8 +21,8 @@ impl ConversationTicket {
         client.check_i_sent_message_today(self.uid,&self.conversation_id,self.conversation_type,self.short_id).await
     }
     /// 调用方须在发送前持久化单次记录并执行身份/历史后检。
-    pub fn build_pcim_initial_request(&self, client: &DouyinClient, key: &GuardKey, client_id: &str, text: &str) -> Result<reqwest::Request> {
-        self.build_pcim_auth_request(client, &GuardSendAuth::Initial(GuardKey::from_slice(&key.to_bytes())?), client_id, text)
+    pub fn build_pcim_signed_request(&self, client: &DouyinClient, key: &GuardKey, material: &crate::douyin::pcim_guard::BoundGuardMaterial, client_id: &str, text: &str) -> Result<reqwest::Request> {
+        self.build_pcim_auth_request(client, &GuardSendAuth::Signed { key: GuardKey::from_slice(&key.to_bytes())?, material: material.clone() }, client_id, text)
     }
     pub(crate) fn build_pcim_auth_request(&self, client: &DouyinClient, auth: &GuardSendAuth, client_id: &str, text: &str) -> Result<reqwest::Request> {
         anyhow::ensure!(!text.trim().is_empty() && text.len()<=4096, "PCIM_INIT_TEXT");
@@ -45,7 +43,7 @@ impl ConversationTicket {
         encode_field_varint(6,7,&mut send);encode_field_bytes(7,self.ticket.as_bytes(),&mut send);encode_field_bytes(8,client_id.as_bytes(),&mut send);
         let mut body=Vec::new();encode_field_bytes(100,&send,&mut body);
         let envelope=initial_envelope(&self.context.envelope,&body)?;
-        let verify_fp = client.extract_cookie_val("s_v_web_id").unwrap_or_else(|| "verify_mv69zog3_NcigV1kI_GBcB_4sG5_AwoJ_mOfsHf5wxNsb".into());
+        let verify_fp = client.extract_cookie_val("s_v_web_id").unwrap_or_else(|| derive_dynamic_verify_fp(client_id));
         let ms_token = client.extract_cookie_val("msToken").unwrap_or_else(|| derive_ms_token(client_id));
         let send_url = format!("https://imapi.douyin.com/v1/message/send?verifyFp={verify_fp}&fp={verify_fp}&msToken={ms_token}");
         let mut request=client.web_request(Method::POST,&send_url)?
@@ -66,16 +64,6 @@ impl ConversationTicket {
                     if let Some(n) = name { request.headers_mut().insert(n, value); }
                 }
                 let mut val = header::HeaderValue::from_str(&current_cookie)?;
-                val.set_sensitive(true);
-                request.headers_mut().insert(header::COOKIE, val);
-            }
-            GuardSendAuth::Initial(key) => {
-                for (name, value) in key.initialization_headers()? {
-                    if let Some(n) = name { request.headers_mut().insert(n, value); }
-                }
-                let cookie = strip_old_guard(&current_cookie);
-                let declaration=format!("{cookie}; bd_ticket_guard_client_data={}; bd_ticket_guard_client_web_domain=2",key.initialization_cookie_value()?);
-                let mut val = header::HeaderValue::from_str(&declaration)?;
                 val.set_sensitive(true);
                 request.headers_mut().insert(header::COOKIE, val);
             }
@@ -180,9 +168,18 @@ fn safe_ack_summary(bytes: &[u8], client_id: &str, uid: u64) -> serde_json::Valu
         "check_code":number(&inner,5),"uuid_matches":unique_field(&inner,4,2).ok().map(|b|b==client_id.as_bytes()),
         "positive_message_id":number(&inner,1).map(|v|v>0)})
 }
+pub fn derive_dynamic_verify_fp(client_id: &str) -> String {
+    use sha2::{Sha256, Digest};
+    let mut hasher = Sha256::new();
+    hasher.update(client_id.as_bytes());
+    hasher.update(b"verify_fp_salt_pcim");
+    let hex = hex::encode(hasher.finalize());
+    format!("verify_{}", &hex[..36])
+}
 
-#[cfg(test)]mod tests {
- use super::*;
+#[cfg(test)]
+mod tests {
+    use super::*;
  const ID:&str="84fd7313-e4c5-4dc5-8cf5-307417d2bbe2";
  fn ack()->Vec<u8>{let mut s=Vec::new();for(n,v)in[(1,7696916217378948657),(3,0),(5,0)]{encode_field_varint(n,v,&mut s)}encode_field_bytes(4,ID.as_bytes(),&mut s);let mut b=Vec::new();encode_field_bytes(100,&s,&mut b);let mut e=Vec::new();for(n,v)in[(1,100),(3,0),(13,99191692311)]{encode_field_varint(n,v,&mut e)}encode_field_bytes(6,&b,&mut e);e}
  #[test]fn strict_ack(){let a=ack();assert_eq!(parse_pcim_initial_ack(&a,ID).unwrap(),"7696916217378948657");assert!(parse_pcim_initial_ack(&a,"other").is_err());let mut dup=a.clone();encode_field_varint(3,0,&mut dup);assert!(parse_pcim_initial_ack(&dup,ID).is_err());for i in 0..a.len(){assert!(parse_pcim_initial_ack(&a[..i],ID).is_err())}}
@@ -301,8 +298,8 @@ impl InitialSubmission<'_> {
         anyhow::ensure!(self.ticket.uid==self.binding.uid && self.ticket.conversation_id==self.binding.cid && self.ticket.conversation_type==self.binding.kind,"PCIM_INIT_TICKET_BINDING");
         // 排队后用同一新钥重建声明，绝不回填原 Cookie 中的旧证书/签名。
         let expected = self.ticket.build_pcim_auth_request(client,self.auth,self.client_id,&self.binding.template)?;
-        anyhow::ensure!(request.url()==expected.url() && request.method()==expected.method()
-            && request.body().and_then(|b|b.as_bytes())==expected.body().and_then(|b|b.as_bytes()), "PCIM_INIT_REQUEST_CHANGED");
+        anyhow::ensure!(request.url() == expected.url() && request.method() == expected.method()
+            && request.body().and_then(|b| b.as_bytes()) == expected.body().and_then(|b| b.as_bytes()), "PCIM_INIT_REQUEST_CHANGED");
         *request = expected;
         Ok(())
     }
@@ -342,22 +339,15 @@ impl DouyinClient {
                 anyhow::ensure!(!already_sent, "PCIM_INIT_ALREADY_SENT_TODAY");
             }
             anyhow::ensure!(matches!(self.check_cookie().await,CheckCookieResult::Valid(_)) && ticket.is_current(self), "PCIM_INIT_PREFLIGHT");
-            let auth = match self.ensure_guard_bound().await {
-                Ok((key, material)) => GuardSendAuth::Signed { key, material },
-                Err(_) => {
-                    let key = self.web_context.lock().unwrap().as_mut()
-                        .and_then(|c| c.get_or_create_guard_key().ok())
-                        .unwrap_or_else(GuardKey::generate);
-                    GuardSendAuth::Initial(key)
-                }
-            };
+            let (key, material) = self.ensure_guard_bound().await
+                .context("PCIM 发送前未确认合法 Guard 签名密钥与有效票据，严禁发出未签名请求以防会话被踢下线")?;
+            let auth = GuardSendAuth::Signed { key, material };
             let client_id = uuid::Uuid::new_v4().to_string();
             stage = "BUILD";
             let request = ticket.build_pcim_auth_request(self,&auth,&client_id,text)?;
             let submission = InitialSubmission { ticket:&ticket,binding:&binding,auth:&auth,client_id:&client_id,day };
             let auth_kind = match &auth {
                 GuardSendAuth::Signed { key, material } => format!("Signed(pub={},mat_age={})", &key.public_key_base64()[..8], chrono::Utc::now().timestamp() - material.acquired_at()),
-                GuardSendAuth::Initial(key) => format!("Initial(pub={})", &key.public_key_base64()[..8]),
             };
             let hdr_keys: Vec<_> = request.headers().keys().map(|k| k.as_str()).collect();
             tracing::warn!(account_id=%binding.account_id, auth=%auth_kind, headers=?hdr_keys, "PCIM 即将发送 /v1/message/send 请求");
@@ -488,9 +478,12 @@ mod queued_gate_tests {
             let ticket=ConversationTicket {uid:99191692311,conversation_id:CID.into(),conversation_type:1,short_id:123,ticket:"offline-ticket".into(),context};
             client.send_history.lock().unwrap().insert(CID.into(),(99191692311,1,beijing_day(),false));
             let binding=InitialBinding {pool:pool.clone(),encrypted_cookie:vec![1],started:Arc::new(AtomicBool::new(true)),account_id:ACCOUNT.into(),uid:99191692311,target_id:TARGET.into(),cid:CID.into(),kind:1,peer:Some("55696816245".into()),target_sec_uid:"fixture".into(),template:"🔥".into(),force:false};
-            let key=GuardKey::generate();let id=uuid::Uuid::new_v4().to_string();
-            let request=ticket.build_pcim_initial_request(&client,&key,&id,"🔥").unwrap();
-            let auth=GuardSendAuth::Initial(key);
+            let key=GuardKey::generate();
+            let data=serde_json::to_vec(&serde_json::json!({"ticket":"offline-ticket","ts_sign":"ts.2.test","client_cert":format!("pub.{}",key.public_key_base64())})).unwrap();
+            let material=key.bind_response(&data,99191692311,&client.get_current_cookie(),chrono::Utc::now().timestamp()).unwrap();
+            let id=uuid::Uuid::new_v4().to_string();
+            let request=ticket.build_pcim_signed_request(&client,&key,&material,&id,"🔥").unwrap();
+            let auth=GuardSendAuth::Signed { key, material };
             let submission=InitialSubmission {ticket:&ticket,binding:&binding,auth:&auth,client_id:&id,day:beijing_day()};
             let guard=client.test_lock_web_session().await;
             let send=client.execute_web_initial(request,&submission);tokio::pin!(send);
