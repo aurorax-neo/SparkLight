@@ -96,10 +96,12 @@ impl ExecutionDiagnostic {
     fn classify(error: &anyhow::Error) -> Self {
         // load_web_context 是可选装载；缺失/过期也可能到后续 IM 查询才报错。
         for cause in error.chain() {
-            match cause.to_string().as_str() {
-                "缺少官方 Web IM 上下文，需同步当前账号凭证，禁止请求" => return Self::WebContextMissing,
-                "官方 IM 上下文已过期，请重新同步，禁止请求" => return Self::WebContextExpired,
-                _ => {}
+            let s = cause.to_string();
+            if s.contains("EXPIRED_BY_CREATE_TIME") || s == "官方 IM 上下文已过期，请重新同步，禁止请求" {
+                return Self::WebContextExpired;
+            }
+            if s == "缺少官方 Web IM 上下文，需同步当前账号凭证，禁止请求" {
+                return Self::WebContextMissing;
             }
         }
         error.downcast_ref::<Self>().copied().unwrap_or(Self::AccountStopped)

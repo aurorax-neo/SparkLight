@@ -72,6 +72,8 @@ async fn main() -> Result<()> {
                         if let Ok(sd) = serde_json::from_str::<Value>(srv_data_str) {
                             let expire_time = sd.get("expire_time").and_then(|v| v.as_i64());
                             println!("    guard_server_data:");
+                           let create_time = sd.get("create_time").and_then(|v| v.as_i64());
+                           println!("      create_time: {:?} (age: {:?}s)", create_time, create_time.map(|t| now - t));
                             println!("      has_ticket: {}", sd.get("ticket").is_some());
                             println!("      has_ts_sign: {}", sd.get("ts_sign").is_some());
                             println!("      client_cert: {:?}", sd.get("client_cert").map(|v| v.as_str().unwrap_or("")));

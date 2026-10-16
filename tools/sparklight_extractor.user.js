@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SparkLight 抖音凭证一键全自动提取助手
 // @namespace    https://sparklight.local/
-// @version      2.2.1
+// @version      2.2.2
 // @description  一键全自动提取抖音完整登录凭证（包含 HttpOnly Cookie 与 Guard 签名私钥/票据），100% 纯本地复制，免除手动抓包
 // @author       SparkLight
 // @match        https://*.douyin.com/*
@@ -33,6 +33,27 @@
       }
     } catch (_) {}
     return '';
+  }
+
+  // 1.1 从 IndexedDB secure-store 兜底读取 Guard 凭证
+  async function readSecureStoreFromIndexedDB() {
+    return new Promise((resolve) => {
+      try {
+        const req = indexedDB.open('secure-store');
+        req.onerror = () => resolve([]);
+        req.onsuccess = (e) => {
+          const db = e.target.result;
+          if (!db.objectStoreNames.contains('cryptvalues')) return resolve([]);
+          const tx = db.transaction('cryptvalues', 'readonly');
+          const store = tx.objectStore('cryptvalues');
+          const getAll = store.getAll();
+          getAll.onsuccess = () => resolve(getAll.result || []);
+          getAll.onerror = () => resolve([]);
+        };
+      } catch (_) {
+        resolve([]);
+      }
+    });
   }
 
   // 2. 页面浮动轻提示 Toast
@@ -215,6 +236,37 @@
         });
       }
     } catch (_) {}
+
+    // 兜底：如果 localStorage 未读取到 Guard 私钥或票据，尝试从 IndexedDB (secure-store) 提取
+    if (!guardPrivHex || !guardServerData) {
+      try {
+        const items = await readSecureStoreFromIndexedDB();
+        for (const item of items) {
+          if (!item) continue;
+          let parsed = null;
+          try {
+            parsed = typeof item === 'string' ? JSON.parse(item) : item;
+            if (parsed && typeof parsed.data === 'string') {
+              parsed = JSON.parse(parsed.data);
+            }
+          } catch (_) {}
+          if (!parsed) continue;
+
+          if (!guardPrivHex && parsed.ec_privateKey) {
+            guardPrivHex = pemToScalarHex(parsed.ec_privateKey);
+          }
+          if (!guardServerData && parsed.ticket && parsed.ts_sign && parsed.client_cert) {
+            guardServerData = JSON.stringify({
+              ticket: parsed.ticket,
+              ts_sign: parsed.ts_sign,
+              client_cert: parsed.client_cert,
+              log_id: parsed.log_id || '',
+              create_time: parsed.create_time || 0
+            });
+          }
+        }
+      } catch (_) {}
+    }
 
     // 采集当前登录用户的标识与昵称
     let userInfo = { uid: '', nickname: '' };

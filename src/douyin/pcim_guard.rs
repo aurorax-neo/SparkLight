@@ -159,7 +159,7 @@ impl BoundGuardMaterial {
         if let Some(ct) = data.create_time {
             let now = chrono::Utc::now().timestamp();
             // 票据生成时间早于 3 天前判定为失效票据，拒绝发送以防被平台 KICK 封禁会话
-            ensure!(ct <= 0 || now.saturating_sub(ct) <= 86400 * 3, "GUARD_MATERIAL_EXPIRED_BY_CREATE_TIME");
+            ensure!(ct <= 0 || now.saturating_sub(ct) <= 86400 * 3, "GUARD_MATERIAL_EXPIRED_BY_CREATE_TIME: 当前账号 Guard 签名票据已过期（生成时间超过3天），已拦截发送以防被平台注销会话；请在抖音页面使用油猴脚本重新一键提取最新凭证导入");
         }
         Ok(Self {
             data,
