@@ -115,9 +115,11 @@ async fn initial_success_requires_exact_ack_identity_uuid_history_and_preserves_
     assert_eq!(seen().iter().filter(|p|p.as_str()==SEND).count(),1);
     REQUESTS.with(|s|{
         let requests=s.borrow();let r=requests.iter().find(|r|r.url().path()==SEND).unwrap();
+        assert_eq!(r.url().as_str(), "https://imapi.douyin.com/v1/message/send");
+        assert!(r.url().query().is_none(), "发信 URL 必须纯净，严禁包含任何 verifyFp/msToken query 参数以防被识别注销");
         let cookie=r.headers()[header::COOKIE].to_str().unwrap();assert!(cookie.contains("ttwid=keep"));
-        assert!(r.headers().contains_key("bd-ticket-guard-client-data"));
-        assert!(r.headers().contains_key("bd-ticket-guard-ree-public-key"));
+        assert!(!r.headers().contains_key("bd-ticket-guard-client-data"), "发信接口 certType 为 cookie，安全票据在 Cookie 中携带，严禁在 Header 注入以防风控注销");
+        assert!(!r.headers().contains_key("bd-ticket-guard-ree-public-key"));
         let send=bytes_field(&bytes_field(r.body().unwrap().as_bytes().unwrap(),8),100);
         assert_eq!(bytes_field(&send,1),CID.as_bytes());assert_eq!(bytes_field(&send,7),b"public-real-ticket");
         let content:serde_json::Value=serde_json::from_slice(&bytes_field(&send,4)).unwrap();assert_eq!(content,serde_json::json!({"aweType":700,"type":0,"richTextInfos":[],"text":"🔥"}));
@@ -310,22 +312,13 @@ async fn full_chain_signed_send_with_guard_signature_and_dtrait() {
         let requests = s.borrow();
         let r = requests.iter().find(|r| r.url().path() == SEND).unwrap();
         
-        assert!(r.headers().contains_key("bd-ticket-guard-client-data"));
-        assert_eq!(r.headers()["bd-ticket-guard-web-version"], "2");
-        assert_eq!(r.headers()["bd-ticket-guard-web-sign-type"], "1");
-        assert!(!r.headers().contains_key("bd-ticket-guard-iteration-version"), "iteration-version 仅存放在 Cookie 中，严禁作为 HTTP 请求头发送以防风控拦截");
-        assert_eq!(r.headers()["bd-ticket-guard-ree-public-key"].to_str().unwrap(), key.public_key_base64().as_str());
-        
-        use base64::Engine;
-        let client_data_b64 = r.headers()["bd-ticket-guard-client-data"].to_str().unwrap();
-        let client_data: serde_json::Value = serde_json::from_slice(&base64::engine::general_purpose::STANDARD.decode(client_data_b64).unwrap()).unwrap();
-        assert_eq!(client_data["ts_sign"], "ts.2.test");
-        assert_eq!(client_data["req_content"], "ticket,path,timestamp");
-        assert_eq!(client_data["t_trust"], 1);
-        
-        assert!(r.headers().contains_key("x-tt-session-dtrait"));
-        let dtrait_hdr = r.headers()["x-tt-session-dtrait"].to_str().unwrap();
-        assert!(dtrait_hdr.starts_with("test-dtrait-v1_"));
+        assert_eq!(r.url().as_str(), "https://imapi.douyin.com/v1/message/send");
+        assert!(r.url().query().is_none(), "发信 URL 必须纯净，严禁包含任何 verifyFp/msToken query 参数以防被识别注销");
+        assert_eq!(r.headers()[header::CONTENT_TYPE], "application/x-protobuf");
+        assert_eq!(r.headers()[header::ACCEPT], "application/x-protobuf");
+        assert!(!r.headers().contains_key("bd-ticket-guard-client-data"), "发信接口 certType 为 cookie，安全票据在 Cookie 中携带，严禁在 Header 注入以防风控注销");
+        assert!(!r.headers().contains_key("bd-ticket-guard-ree-public-key"));
+        assert!(!r.headers().contains_key("x-tt-session-dtrait"));
     });
     
     let state: String = sqlx::query_scalar("SELECT state FROM im_send_attempts").fetch_one(&pool).await.unwrap();

@@ -1011,20 +1011,12 @@ impl SparkEngine {
     pub async fn heartbeat_all_active_accounts(&self) -> Result<()> {
         let accounts = db::list_accounts(&self.pool).await?;
         let sync_profiles = claim_profile_sync();
-        let now = Utc::now();
-        let manual_silence = self.is_in_manual_silence_window();
         for account in accounts {
             if account.status != "ACTIVE" {
                 continue;
             }
-            // 防打扰退避机制：
-            // 1. 若最近 30 分钟内发生过任何前台手动操作，后台巡检严格保持静默，绝不发送失败告警
-            // 2. 若该账号在最近 10 分钟（600 秒）内曾被前台手动操作或检测过，后台巡检严格保持静默
-            let recently_checked = account.last_checked_at
-                .and_then(|at| now.signed_duration_since(at).num_seconds().try_into().ok())
-                .is_some_and(|secs: i64| (0..=600).contains(&secs));
-            let notify = !manual_silence && !recently_checked;
-            if !self.check_account_cookie(&account, notify).await.unwrap_or(false) { continue; }
+            // 后台定时心跳保活巡检严格保持静默，绝不向 Bark 发送失败告警；告警仅在每日计划任务执行失败时产生
+            if !self.check_account_cookie(&account, false).await.unwrap_or(false) { continue; }
             if !sync_profiles {
                 continue;
             }

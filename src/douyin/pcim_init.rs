@@ -43,10 +43,8 @@ impl ConversationTicket {
         encode_field_varint(6,7,&mut send);encode_field_bytes(7,self.ticket.as_bytes(),&mut send);encode_field_bytes(8,client_id.as_bytes(),&mut send);
         let mut body=Vec::new();encode_field_bytes(100,&send,&mut body);
         let envelope=initial_envelope(&self.context.envelope,&body)?;
-        let verify_fp = client.extract_cookie_val("s_v_web_id").unwrap_or_else(|| derive_dynamic_verify_fp(client_id));
-        let ms_token = client.extract_cookie_val("msToken").unwrap_or_else(|| derive_ms_token(client_id));
-        let send_url = format!("https://imapi.douyin.com/v1/message/send?verifyFp={verify_fp}&fp={verify_fp}&msToken={ms_token}");
-        let mut request=client.web_request(Method::POST,&send_url)?
+        let send_url = "https://imapi.douyin.com/v1/message/send";
+        let mut request=client.web_request(Method::POST, send_url)?
             .header(header::CONTENT_TYPE,"application/x-protobuf").header(header::ACCEPT,"application/x-protobuf")
             .header("sec-ch-ua", "\"Brave\";v=\"155\", \"Chromium\";v=\"155\", \"Not(A:Brand\";v=\"24\"")
             .header("sec-ch-ua-mobile", "?0")
@@ -54,35 +52,16 @@ impl ConversationTicket {
             .header("sec-fetch-dest", "empty")
             .header("sec-fetch-mode", "cors")
             .header("sec-fetch-site", "same-site")
-            .header(header::ACCEPT_LANGUAGE, "zh-CN,zh;q=0.8")
+            .header(header::ACCEPT_LANGUAGE, "zh-CN,zh;q=0.9")
             .body(envelope).build()?;
         match auth {
             GuardSendAuth::Signed { key, material } => {
                 let now = chrono::Utc::now().timestamp();
-                let headers = key.sign_send(
-                    material,
-                    self.uid,
-                    &current_cookie,
-                    now,
-                    crate::douyin::pcim_guard::GuardMode::Hmac {
-                        server_spki_der: crate::douyin::pcim_guard::OFFICIAL_SERVER_SPKI_DER,
-                    },
-                )?;
-                for (name, value) in headers {
-                    if let Some(n) = name { request.headers_mut().insert(n, value); }
-                }
+                material.validate_freshness(now)?;
+                key.verify_binding(material)?;
                 let mut val = header::HeaderValue::from_str(&current_cookie)?;
                 val.set_sensitive(true);
                 request.headers_mut().insert(header::COOKIE, val);
-            }
-        }
-        if let Ok(Some(cipher)) = client.web_context.lock().unwrap().as_ref().map_or(Ok(None), |c| c.get_dtrait_cipher()) {
-            let mut protocol = crate::douyin::pcim_features::FeatureProtocol::new();
-            protocol.add_bool("bool_1", true);
-            protocol.add_hash("str_1", crate::douyin::pcim_features::murmur3("douyin_web"));
-            let (central, _) = protocol.result();
-            if let Ok(hdr) = cipher.central_header(&central, "/v1/message/send", &[], chrono::Utc::now().timestamp()) {
-                request.headers_mut().insert("x-tt-session-dtrait", hdr);
             }
         }
         Ok(request)
@@ -90,10 +69,19 @@ impl ConversationTicket {
 }
 fn initial_envelope(context:&[u8],body:&[u8])->Result<Vec<u8>> {
     let mut envelope=Vec::new();
-    encode_field_varint(1,100,&mut envelope);encode_field_varint(2,10015,&mut envelope);
-    for (n,v) in [(3,"0.1.8"),(4,""),(7,"0d50935:feat/pc-im-group"),(11,"douyin_pc"),(21,"douyin_web"),(22,"web_sdk")] {encode_field_bytes(n,v.as_bytes(),&mut envelope);}
-    for (n,v) in [(5,3),(6,0),(18,1)]{encode_field_varint(n,v,&mut envelope);}
+    encode_field_varint(1, 100, &mut envelope);
+    let hash = body.iter().fold(0u64, |acc, &b| acc.wrapping_mul(31).wrapping_add(b as u64));
+    let seq_id = 10000 + ((hash >> 8) % 50000);
+    encode_field_varint(2, seq_id, &mut envelope);
+    encode_field_bytes(3, b"0.1.8", &mut envelope);
+    encode_field_bytes(4, b"", &mut envelope);
+    encode_field_varint(5, 3, &mut envelope);
+    encode_field_varint(6, 0, &mut envelope);
+    encode_field_bytes(7, b"0d50935:feat/pc-im-group", &mut envelope);
     encode_field_bytes(8,body,&mut envelope);
+    encode_field_bytes(9, b"0", &mut envelope);
+    encode_field_bytes(11, b"douyin_pc", &mut envelope);
+    encode_field_bytes(14, b"360000", &mut envelope);
     let mut found=std::collections::BTreeSet::new();
     let mut identity_fields = std::collections::BTreeMap::new();
     for (n,w,b) in parse_protobuf_fields(context) {
@@ -126,7 +114,7 @@ fn initial_envelope(context:&[u8],body:&[u8])->Result<Vec<u8>> {
         ("browser_online", b"true"),
         ("screen_width", b"2560"),
         ("screen_height", b"1440"),
-        ("referer", b"https://www.douyin.com/user/self"),
+        ("referer", b"https://www.douyin.com/chat"),
         ("timezone_name", b"Asia/Shanghai"),
         ("deviceId", b"0"),
         ("is-retry", b"0"),
@@ -137,6 +125,9 @@ fn initial_envelope(context:&[u8],body:&[u8])->Result<Vec<u8>> {
         encode_field_bytes(2, val, &mut h);
         encode_field_bytes(15, &h, &mut envelope);
     }
+    encode_field_varint(18, 1, &mut envelope);
+    encode_field_bytes(21, b"douyin_web", &mut envelope);
+    encode_field_bytes(22, b"web_sdk", &mut envelope);
     Ok(envelope)
 }
 fn derive_ms_token(client_id: &str) -> String {
@@ -211,6 +202,7 @@ mod tests {
      for end in 0..a.len() {assert!(safe_ack_summary(&a[..end],ID,99191692311).to_string().len()<256);}
  }
  #[test]fn envelope_uses_observed_branch_not_old_read_version(){let mut c=Vec::new();for(k,v)in[("identity_security_token","{\"token\":\"fixture\"}"),("identity_security_device_id","fixture-device"),("identity_security_aid","6383"),("session_aid","6383"),("user_agent","fixture-UA")]{let mut h=Vec::new();encode_field_bytes(1,k.as_bytes(),&mut h);encode_field_bytes(2,v.as_bytes(),&mut h);encode_field_bytes(15,&h,&mut c)}let e=initial_envelope(&c,b"fixture").unwrap();let f=parse_protobuf_fields(&e);assert_eq!(unique_field(&f,3,2).unwrap(),b"0.1.8");assert_eq!(read_varint(unique_field(&f,6,0).unwrap(),0).unwrap().0,0);let h=f.iter().filter(|(n,_,_)|*n==15).map(|(_,_,b)|parse_protobuf_fields(b)).find(|h|unique_field(h,1,2).unwrap()==b"identity_security_aid").unwrap();assert_eq!(unique_field(&h,2,2).unwrap(),b"");assert!(initial_envelope(b"",b"x").is_err());let duplicate=[c.clone(),c].concat();assert!(initial_envelope(&duplicate,b"x").is_err())}
+#[test]fn envelope_matches_official_capture_baseline(){let mut c=Vec::new();for(k,v)in[("identity_security_token","{\"token\":\"fixture\"}"),("identity_security_device_id","fixture-device"),("identity_security_aid","6383"),("session_aid","6383"),("user_agent","fixture-UA")]{let mut h=Vec::new();encode_field_bytes(1,k.as_bytes(),&mut h);encode_field_bytes(2,v.as_bytes(),&mut h);encode_field_bytes(15,&h,&mut c)}let e=initial_envelope(&c,b"fixture").unwrap();let f=parse_protobuf_fields(&e);assert_eq!(unique_field(&f,1,0).unwrap()[0],100);assert_eq!(unique_field(&f,9,2).unwrap(),b"0");assert_eq!(unique_field(&f,11,2).unwrap(),b"douyin_pc");assert_eq!(unique_field(&f,14,2).unwrap(),b"360000");assert_eq!(unique_field(&f,21,2).unwrap(),b"douyin_web");assert_eq!(unique_field(&f,22,2).unwrap(),b"web_sdk");}
 }
 
 #[cfg(test)] pub(crate) const ACCOUNT: &str = "acc_37094b76c50f4e0aa1da3848c3e12534";

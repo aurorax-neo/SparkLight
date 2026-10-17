@@ -43,6 +43,10 @@ impl GuardKey {
     pub fn public_key_base64(&self) -> String {
         STANDARD.encode(self.secret.public_key().to_encoded_point(false).as_bytes())
     }
+    pub fn verify_binding(&self, material: &BoundGuardMaterial) -> Result<()> {
+        anyhow::ensure!(material.public == self.public_key_base64(), "GUARD_KEY_PUBLIC_MISMATCH");
+        Ok(())
+    }
     /// 官方 _processCookie 的公钥初始化声明；不是发送签名，也不是服务端授权。
     pub fn initialization_cookie_value(&self) -> Result<String> {
         #[derive(Serialize)]
@@ -204,6 +208,10 @@ impl BoundGuardMaterial {
     pub fn ticket(&self) -> &str { &self.data.ticket }
     pub fn public_key(&self) -> &str { &self.public }
     pub fn acquired_at(&self) -> i64 { self.acquired_at }
+    pub fn validate_freshness(&self, now: i64) -> Result<()> {
+        anyhow::ensure!(!self.is_stale(now, 86400), "GUARD_MATERIAL_STALE");
+        Ok(())
+    }
 }
 pub enum GuardMode<'a> { Ecdsa, Hmac { server_spki_der: &'a [u8] } }
 
