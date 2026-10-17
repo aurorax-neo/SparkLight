@@ -309,6 +309,7 @@ pub async fn get_target(
 pub async fn refresh_target(
     State(state): State<AppState>, Path(id): Path<String>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
+    state.engine.record_manual_action();
     let internal = |_| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"code":500,"message":"目标刷新失败"})));
     let target = db::get_target(&state.pool, &id).await.map_err(internal)?
         .ok_or_else(|| (StatusCode::NOT_FOUND, Json(json!({"code":404,"message":"目标不存在"}))))?;

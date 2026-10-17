@@ -55,7 +55,7 @@ impl BarkNotifier {
         if last > 0 {
             let now = chrono::Utc::now().timestamp();
             let diff = now - last;
-            if (0..=1800).contains(&diff) {
+            if (-60..=1800).contains(&diff) {
                 tracing::info!(diff_secs = diff, "Bark 推送已物理拦截：处于前台手动操作静默期 (30分钟窗口内)");
                 return Ok(());
             }

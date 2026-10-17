@@ -108,7 +108,7 @@ fn initial_envelope(context:&[u8],body:&[u8])->Result<Vec<u8>> {
         let value=unique_field(&f,2,2)?;
         identity_fields.insert(name.to_owned(), value.to_vec());
     }
-    anyhow::ensure!(found.len()==5,"PCIM_INIT_MISSING_IDENTITY");
+    anyhow::ensure!(found.contains("session_aid") && found.contains("user_agent"),"PCIM_INIT_MISSING_IDENTITY");
     let empty = Vec::new();
     let token_val = identity_fields.get("identity_security_token").unwrap_or(&empty);
     let device_val = identity_fields.get("identity_security_device_id").unwrap_or(&empty);
