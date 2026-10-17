@@ -321,7 +321,7 @@ async fn full_chain_signed_send_with_guard_signature_and_dtrait() {
         let client_data: serde_json::Value = serde_json::from_slice(&base64::engine::general_purpose::STANDARD.decode(client_data_b64).unwrap()).unwrap();
         assert_eq!(client_data["ts_sign"], "ts.2.test");
         assert_eq!(client_data["req_content"], "ticket,path,timestamp");
-        assert_eq!(client_data["t_trust"], 1);
+        assert!(client_data.get("t_trust").is_none());
         
         assert!(r.headers().contains_key("x-tt-session-dtrait"));
         let dtrait_hdr = r.headers()["x-tt-session-dtrait"].to_str().unwrap();

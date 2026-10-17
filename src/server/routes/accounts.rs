@@ -319,8 +319,13 @@ pub async fn check_account(
 
     tracing::info!(account_alias = %account.alias, "用户在前端手动点击检测有效性，严格保持静默，不触发 Bark 推送");
     // 前台手动点击检测有效性为主动测试行为，结果直接在网页前端提示，严禁向 Bark 发送推送通知
-    let is_valid = state.engine.check_account_cookie(&account, false).await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"code": 500, "message": e.to_string()}))))?;
+    let is_valid = match state.engine.check_account_cookie(&account, false).await {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!(account_alias = %account.alias, err = %e, "检测账号有效性遇到诊断异常，按未通过处理返回前端，严格保持静默不发 Bark");
+            false
+        }
+    };
 
     let latest = db::get_account(&state.pool, &id).await.unwrap_or(Some(account)).unwrap();
 

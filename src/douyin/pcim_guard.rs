@@ -141,7 +141,7 @@ impl GuardKey {
                 (STANDARD.encode(mac.finalize().into_bytes()), "1")
             }
         };
-        let t_trust = Some(1);
+        let t_trust = None;
         let payload = ClientData { ts_sign: &material.data.ts_sign, req_content: "ticket,path,timestamp", req_sign: &signature, timestamp, t_trust };
         let value = STANDARD.encode(serde_json::to_vec(&payload).context("GUARD_ENCODE_FAILED")?);
         let mut headers = HeaderMap::new();
@@ -253,7 +253,7 @@ mod tests {
             assert_eq!(data["timestamp"],1700000001);
             let sig=Signature::from_der(&STANDARD.decode(data["req_sign"].as_str().unwrap()).unwrap()).unwrap();
             let public=VerifyingKey::from(&SigningKey::from(&key.secret));
-            assert_eq!(data["t_trust"], 1);
+            assert!(data.get("t_trust").is_none());
             public.verify(b"ticket=offline-ticket&path=/v1/message/send&timestamp=1700000001",&sig).unwrap();
             assert!(public.verify(b"ticket=offline-ticket&path=/other&timestamp=1700000001",&sig).is_err());
         }
@@ -280,7 +280,7 @@ mod tests {
             assert_eq!(data["ts_sign"], case["ts_sign"]);
             assert_eq!(data["req_content"], case["input"]["req_content"]);
             assert_eq!(data["timestamp"], case["input"]["timestamp"]);
-            assert_eq!(data["t_trust"], 1);
+            assert!(data.get("t_trust").is_none());
             if hmac {
                 assert_eq!(data["req_sign"], case["signature_base64"].as_str().unwrap());
             } else {
