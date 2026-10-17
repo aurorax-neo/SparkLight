@@ -360,6 +360,7 @@ impl DouyinClient {
                     .with_identity(&dummy_identity)?,
             };
             context.identity_acquired_at = Some(now);
+            context.captured_at = now;
             self.set_web_context(context)?;
             return Ok(());
         }
@@ -440,6 +441,7 @@ impl DouyinClient {
         let context=self.web_context.lock().unwrap().clone();
         if let Some(mut ctx)=context {
             if ctx.session_hash != super::im_auth::session_hash(&self.get_current_cookie())? { return Ok(()); }
+            ctx.captured_at = chrono::Utc::now().timestamp();
             if ctx.guard_secret_hex.is_none() || ctx.guard_server_data.is_none() {
                 if let Ok(Some(old_enc)) = sqlx::query_scalar::<_, Vec<u8>>("SELECT encrypted_context FROM account_web_contexts WHERE account_id=?1").bind(account_id).fetch_optional(pool).await {
                     if let Ok(old_plain) = secret.decrypt(&old_enc) {
@@ -453,6 +455,7 @@ impl DouyinClient {
             sqlx::query("INSERT INTO account_web_contexts(account_id,encrypted_context) VALUES(?1,?2) ON CONFLICT(account_id) DO UPDATE SET encrypted_context=excluded.encrypted_context")
                 .bind(account_id).bind(encrypted).execute(pool).await?;
             if let Some(mem_ctx) = self.web_context.lock().unwrap().as_mut() {
+                mem_ctx.captured_at = ctx.captured_at;
                 mem_ctx.inherit_guard_materials(&ctx);
             }
         }
