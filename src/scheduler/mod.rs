@@ -1,6 +1,6 @@
 use std::{
     sync::{
-        atomic::{AtomicBool, AtomicU32, Ordering},
+        atomic::{AtomicBool, AtomicI64, AtomicU32, Ordering},
         Arc,
     },
     time::Duration,
@@ -37,6 +37,7 @@ pub struct SparkEngine {
     pub(crate) settings_update_lock: Arc<Mutex<()>>,
     pub max_retries: Arc<AtomicU32>,
     pub is_running: Arc<AtomicBool>,
+    pub last_manual_action: Arc<AtomicI64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
@@ -226,7 +227,27 @@ impl SparkEngine {
             settings_update_lock: Arc::new(Mutex::new(())),
             max_retries: Arc::new(AtomicU32::new(max_retries)),
             is_running: Arc::new(AtomicBool::new(false)),
+            last_manual_action: Arc::new(AtomicI64::new(0)),
         }
+    }
+
+    /// 记录前台手动操作（手动检测、手动续火花、新增/更新账号等）。
+    /// 触发后激活 30 分钟（1800 秒）后台巡检与告警静默退避，严防前台操作连带触发 Bark 推送。
+    pub fn record_manual_action(&self) {
+        let now = Utc::now().timestamp();
+        self.last_manual_action.store(now, Ordering::Relaxed);
+        tracing::info!(timestamp = now, "已记录前台手动操作，已激活 30 分钟后台推送静默退避");
+    }
+
+    /// 检查当前是否处于前台手动操作触发的 30 分钟静默窗口期。
+    pub fn is_in_manual_silence_window(&self) -> bool {
+        let last = self.last_manual_action.load(Ordering::Relaxed);
+        if last == 0 {
+            return false;
+        }
+        let now = Utc::now().timestamp();
+        let diff = now - last;
+        (0..=1800).contains(&diff)
     }
 
     pub fn delay_range(&self) -> (u64,u64) { *self.delay_settings.borrow() }
@@ -273,7 +294,7 @@ impl SparkEngine {
                     let err_msg = "Cookie 解密后不是有效的 UTF-8 文本";
                     self.record_log(&account.id, &account.alias, None, None, "CHECK_COOKIE", "FAILED", err_msg).await.ok();
                     db::update_account_status(&self.pool, &account.id, "EXPIRED", Utc::now()).await?;
-                    if notify_on_failure {
+                    if notify_on_failure && !self.is_in_manual_silence_window() {
                         self.notifier.send_cookie_expired_alert(&account.alias, account.nickname.as_deref(), err_msg, account.bark_key_override.as_deref()).await.ok();
                     }
                     return Ok(false);
@@ -283,7 +304,7 @@ impl SparkEngine {
                 let err_msg = "Cookie 解密失败（错误详情已省略）";
                 self.record_log(&account.id, &account.alias, None, None, "CHECK_COOKIE", "FAILED", &err_msg).await.ok();
                 db::update_account_status(&self.pool, &account.id, "EXPIRED", Utc::now()).await?;
-                if notify_on_failure {
+                if notify_on_failure && !self.is_in_manual_silence_window() {
                     self.notifier.send_cookie_expired_alert(&account.alias, account.nickname.as_deref(), err_msg, account.bark_key_override.as_deref()).await.ok();
                 }
                 return Ok(false);
@@ -346,7 +367,7 @@ impl SparkEngine {
             crate::douyin::types::CheckCookieResult::Expired(reason) => {
                 db::update_account_status(&self.pool, &account.id, "EXPIRED", Utc::now()).await?;
                 self.record_log(&account.id, &account.alias, None, None, "CHECK_COOKIE", "FAILED", "Cookie 已失效，已停止账号任务").await.ok();
-                if notify_on_failure {
+                if notify_on_failure && !self.is_in_manual_silence_window() {
                     self.notifier.send_cookie_expired_alert(&account.alias, account.nickname.as_deref(), &reason, account.bark_key_override.as_deref()).await.ok();
                 }
                 Ok(false)
@@ -354,7 +375,7 @@ impl SparkEngine {
             crate::douyin::types::CheckCookieResult::NeedVerify(reason) => {
                 db::update_account_status(&self.pool, &account.id, "EXPIRED", Utc::now()).await?;
                 self.record_log(&account.id, &account.alias, None, None, "CHECK_COOKIE", "FAILED", "当前账号需要安全验证，已停止账号任务").await.ok();
-                if notify_on_failure {
+                if notify_on_failure && !self.is_in_manual_silence_window() {
                     self.notifier.send_cookie_expired_alert(&account.alias, account.nickname.as_deref(), &format!("需要安全验证: {reason}"), account.bark_key_override.as_deref()).await.ok();
                 }
                 Ok(false)
@@ -631,7 +652,7 @@ impl SparkEngine {
                 ).await.ok();
 
                 // 仅在明确启用失败告警（notify_on_failure == true）时向 Bark 发送通知，前台手动操作一律静默
-                if notify_on_failure {
+                if notify_on_failure && !self.is_in_manual_silence_window() {
                     let alert_body = format!(
                         "对好友「{}」自动续火花尝试 {} 次后失败！\n原因: {}",
                         target.target_nickname, attempt, result.message
@@ -844,7 +865,7 @@ impl SparkEngine {
             ).await.ok();
 
             // 仅在明确启用失败告警（notify_on_failure == true）时向 Bark 发送通知，前台手动操作一律静默
-            if notify_on_failure {
+            if notify_on_failure && !self.is_in_manual_silence_window() {
                 self.notifier.send_notification(
                     account.bark_key_override.as_deref(),
                     "【抖音火花助手】续火花失败",
@@ -991,15 +1012,18 @@ impl SparkEngine {
         let accounts = db::list_accounts(&self.pool).await?;
         let sync_profiles = claim_profile_sync();
         let now = Utc::now();
+        let manual_silence = self.is_in_manual_silence_window();
         for account in accounts {
             if account.status != "ACTIVE" {
                 continue;
             }
-            // 防打扰退避机制：若账号在最近 10 分钟（600 秒）内曾被前台手动操作或检测过，后台巡检严格保持静默，绝不发送失败告警
+            // 防打扰退避机制：
+            // 1. 若最近 30 分钟内发生过任何前台手动操作，后台巡检严格保持静默，绝不发送失败告警
+            // 2. 若该账号在最近 10 分钟（600 秒）内曾被前台手动操作或检测过，后台巡检严格保持静默
             let recently_checked = account.last_checked_at
                 .and_then(|at| now.signed_duration_since(at).num_seconds().try_into().ok())
                 .is_some_and(|secs: i64| (0..=600).contains(&secs));
-            let notify = !recently_checked;
+            let notify = !manual_silence && !recently_checked;
             if !self.check_account_cookie(&account, notify).await.unwrap_or(false) { continue; }
             if !sync_profiles {
                 continue;
@@ -1372,5 +1396,13 @@ mod diagnostic_tests {
         assert!(!is_valid);
         let accept_result = tokio::time::timeout(Duration::from_secs(1), listener.accept()).await;
         assert!(accept_result.is_ok(), "后台检测失败时应向 Bark 发送告警");
+
+        // 3. 记录前台手动操作后（notify_on_failure = true）：必须进入 30 分钟静默期，严禁向 Bark 发送请求
+        engine.record_manual_action();
+        assert!(engine.is_in_manual_silence_window());
+        let is_valid = engine.check_account_cookie(&account, true).await.unwrap();
+        assert!(!is_valid);
+        let accept_result = tokio::time::timeout(Duration::from_millis(100), listener.accept()).await;
+        assert!(accept_result.is_err(), "处于手动操作静默期时，即使 notify_on_failure=true 也严禁向 Bark 发送请求");
     }
 }

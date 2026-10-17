@@ -76,6 +76,7 @@ pub async fn create_account(
     State(state): State<AppState>,
     Json(req): Json<CreateAccountReq>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
+    state.engine.record_manual_action();
     let cookie_raw = req.cookie.trim();
     if cookie_raw.is_empty() {
         return Err((StatusCode::BAD_REQUEST, Json(json!({"code": 400, "message": "Cookie 不能为空"}))));
@@ -222,6 +223,7 @@ pub async fn update_account(
     Path(id): Path<String>,
     Json(req): Json<UpdateAccountReq>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
+    state.engine.record_manual_action();
     let existing = db::get_account(&state.pool, &id).await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"code": 500, "message": e.to_string()}))))?
         .ok_or_else(|| (StatusCode::NOT_FOUND, Json(json!({"code": 404, "message": "账号不存在"}))))?;
@@ -309,6 +311,7 @@ pub async fn check_account(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
+    state.engine.record_manual_action();
     let account = db::get_account(&state.pool, &id).await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"code": 500, "message": e.to_string()}))))?
         .ok_or_else(|| (StatusCode::NOT_FOUND, Json(json!({"code": 404, "message": "账号不存在"}))))?;
@@ -336,6 +339,7 @@ pub async fn sync_friends(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
+    state.engine.record_manual_action();
     let account = db::get_account(&state.pool, &id).await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"code": 500, "message": e.to_string()}))))?
         .ok_or_else(|| (StatusCode::NOT_FOUND, Json(json!({"code": 404, "message": "账号不存在"}))))?;
@@ -447,6 +451,7 @@ pub async fn run_account(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
+    state.engine.record_manual_action();
     let summary = state.engine.execute_single_account(&id, true, false).await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"code": 500, "message": e.to_string()}))))?;
 

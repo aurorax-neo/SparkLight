@@ -8,6 +8,17 @@ use reqwest::header::{HeaderMap, HeaderValue};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 
+/// 官方抖音 Web 端 PCIM Guard 服务端 SPKI 公钥 (secp256r1 P-256)
+/// Base64: MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEhNpZQz5X3PEavuSeR14YOHnRYz5whd1GuyQaIhP36D/Zuy+RCyHL8QoBMWkQh20PJAgivwK2eBV/6gqG2QJE6A==
+pub const OFFICIAL_SERVER_SPKI_DER: &[u8] = &[
+    0x30, 0x59, 0x30, 0x13, 0x06, 0x07, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01, 0x06, 0x08, 0x2a,
+    0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07, 0x03, 0x42, 0x00, 0x04, 0x84, 0xda, 0x59, 0x43, 0x3e,
+    0x57, 0xdc, 0xf1, 0x1a, 0xbe, 0xe4, 0x9e, 0x47, 0x5e, 0x18, 0x38, 0x79, 0xd1, 0x63, 0x3e, 0x70,
+    0x85, 0xdd, 0x46, 0xbb, 0x24, 0x1a, 0x22, 0x13, 0xf7, 0xe8, 0x3f, 0xd9, 0xbb, 0x2f, 0x91, 0x0b,
+    0x21, 0xcb, 0xf1, 0x0a, 0x01, 0x31, 0x69, 0x10, 0x87, 0x6d, 0x0f, 0x24, 0x08, 0x22, 0xbf, 0x02,
+    0xb6, 0x78, 0x15, 0x7f, 0xea, 0x0a, 0x86, 0xd9, 0x02, 0x44, 0xe8,
+];
+
 /// 无 Debug/Serialize 或私钥导出接口；只能生成独立密钥。
 #[derive(Clone)]
 pub struct GuardKey { secret: SecretKey }
@@ -133,7 +144,7 @@ impl GuardKey {
         let payload = ClientData { ts_sign: &material.data.ts_sign, req_content: "ticket,path,timestamp", req_sign: &signature, timestamp, t_trust };
         let value = STANDARD.encode(serde_json::to_vec(&payload).context("GUARD_ENCODE_FAILED")?);
         let mut headers = HeaderMap::new();
-        for (name, text) in [("bd-ticket-guard-ree-public-key", material.public.as_str()), ("bd-ticket-guard-web-version", if material.data.ts_sign.starts_with("ts.1") { "1" } else { "2" }), ("bd-ticket-guard-web-sign-type", sign_type), ("bd-ticket-guard-version", "2"), ("bd-ticket-guard-client-data", value.as_str())] {
+        for (name, text) in [("bd-ticket-guard-ree-public-key", material.public.as_str()), ("bd-ticket-guard-web-version", if material.data.ts_sign.starts_with("ts.1") { "1" } else { "2" }), ("bd-ticket-guard-web-sign-type", sign_type), ("bd-ticket-guard-version", "2"), ("bd-ticket-guard-iteration-version", "1"), ("bd-ticket-guard-client-data", value.as_str())] {
             let mut header = HeaderValue::from_str(text).map_err(|_| anyhow::anyhow!("GUARD_INVALID_HEADER"))?;
             header.set_sensitive(true);
             headers.insert(name, header);
@@ -222,6 +233,7 @@ mod tests {
             assert_eq!(key.public_key_base64().len(),88);
             assert_eq!(headers["bd-ticket-guard-web-version"],if prefix=="ts.1" {"1"}else{"2"});
             assert_eq!(headers["bd-ticket-guard-web-sign-type"],"0");
+            assert_eq!(headers["bd-ticket-guard-iteration-version"],"1");
             assert!(headers.values().all(|v|v.is_sensitive()));
             let decoded=STANDARD.decode(headers["bd-ticket-guard-client-data"].as_bytes()).unwrap();
             let data:serde_json::Value=serde_json::from_slice(&decoded).unwrap();
@@ -235,6 +247,7 @@ mod tests {
     }
     #[test]
     fn official_pcim_headers_and_node_crypto_match() {
+        assert!(PublicKey::from_public_key_der(OFFICIAL_SERVER_SPKI_DER).is_ok());
         let fixture: serde_json::Value = serde_json::from_str(include_str!("sdk/pcim_guard_baseline.json")).unwrap();
         let scalar = hex::decode(fixture["test_only_scalar_hex"].as_str().unwrap()).unwrap();
         let key = GuardKey { secret: SecretKey::from_slice(&scalar).unwrap() };
