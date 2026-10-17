@@ -328,6 +328,71 @@ impl DouyinClient {
             context.history_status(uid, &self.get_current_cookie(), chrono::Utc::now().timestamp()))
     }
 
+    /// 模拟真实 Web 端 IM 用户活跃心跳 (https://www-hj.douyin.com/aweme/v1/web/im/user/active/update/)
+    /// 维持账号在抖音 Web 端在线状态，吸收最新下发的 Cookie (如 ttwid 等)
+    pub async fn send_im_user_heartbeat(&self) -> Result<()> {
+        let ms_token = self.extract_cookie_val("msToken").unwrap_or_else(|| {
+            use rand::Rng;
+            const CHARSET: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_";
+            let mut rng = rand::thread_rng();
+            (0..176).map(|_| { let idx = rng.gen_range(0..CHARSET.len()); CHARSET[idx] as char }).collect()
+        });
+        let verify_fp = self.extract_cookie_val("s_v_web_id").unwrap_or_default();
+        let request = self.web_request(Method::GET, "https://www-hj.douyin.com/aweme/v1/web/im/user/active/update/")?
+            .query(&[
+                ("device_platform", "webapp"),
+                ("aid", "6383"),
+                ("channel", "channel_pc_web"),
+                ("action", "heartbeat"),
+                ("new_user_login", "0"),
+                ("update_version_code", "170400"),
+                ("pc_client_type", "1"),
+                ("pc_libra_divert", "Mac"),
+                ("support_h265", "1"),
+                ("support_dash", "1"),
+                ("cpu_core_num", "8"),
+                ("version_code", "170400"),
+                ("version_name", "17.4.0"),
+                ("cookie_enabled", "true"),
+                ("screen_width", "1920"),
+                ("screen_height", "1080"),
+                ("browser_language", "zh-CN"),
+                ("browser_platform", "MacIntel"),
+                ("browser_name", "Chrome"),
+                ("browser_version", "133.0.0.0"),
+                ("browser_online", "true"),
+                ("engine_name", "Blink"),
+                ("engine_version", "133.0.0.0"),
+                ("os_name", "Mac+OS"),
+                ("os_version", "10.15.7"),
+                ("device_memory", "8"),
+                ("platform", "PC"),
+                ("msToken", &ms_token),
+                ("verifyFp", &verify_fp),
+                ("fp", &verify_fp),
+            ])
+            .header("accept", "application/json, text/plain, */*")
+            .header("referer", "https://www.douyin.com/")
+            .header("sec-ch-ua", DEFAULT_SEC_CH_UA)
+            .header("sec-ch-ua-mobile", DEFAULT_SEC_CH_UA_MOBILE)
+            .header("sec-ch-ua-platform", DEFAULT_SEC_CH_UA_PLATFORM)
+            .header("sec-fetch-dest", "empty")
+            .header("sec-fetch-mode", "cors")
+            .header("sec-fetch-site", "same-site");
+
+        let response = self.execute_web(request.build()?).await;
+        if let Ok((headers, bytes, _guard)) = response {
+            self.merge_response_headers(&headers);
+            if let Ok(json) = serde_json::from_slice::<serde_json::Value>(&bytes) {
+                if json.get("status_code").and_then(|c| c.as_i64()) == Some(0) {
+                    tracing::debug!(account = %self.account_alias, "Web IM 心跳保活上报成功");
+                    return Ok(());
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// 独立获取官方身份 Token；不生成发送签名或一次性发送授权。
     pub async fn acquire_im_identity(&self, expected_uid: Option<&str>) -> Result<()> {
         let uid=self.verified_sender_uid(expected_uid)?;

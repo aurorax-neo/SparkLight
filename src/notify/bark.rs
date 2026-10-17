@@ -119,6 +119,15 @@ impl BarkNotifier {
         reason: &str,
         key_override: Option<&str>,
     ) -> Result<()> {
+        let last = self.manual_silence_timestamp.load(Ordering::Relaxed);
+        if last > 0 {
+            let now = chrono::Utc::now().timestamp();
+            let diff = now - last;
+            if (-60..=1800).contains(&diff) {
+                tracing::info!(diff_secs = diff, "Bark 失效告警已物理拦截：处于前台手动操作静默期 (30分钟窗口内)");
+                return Ok(());
+            }
+        }
         let display_name = nickname.unwrap_or("未命名账号");
         let title = "【抖音火花助手】账号凭证失效";
         let body = format!(

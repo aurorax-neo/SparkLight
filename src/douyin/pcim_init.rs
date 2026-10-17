@@ -40,9 +40,9 @@ impl ConversationTicket {
         encode_field_varint(6,7,&mut send);encode_field_bytes(7,self.ticket.as_bytes(),&mut send);encode_field_bytes(8,client_id.as_bytes(),&mut send);
         let mut body=Vec::new();encode_field_bytes(100,&send,&mut body);
         let envelope=initial_envelope(&self.context.envelope,&body)?;
-        let _verify_fp = client.extract_cookie_val("s_v_web_id").unwrap_or_else(|| derive_dynamic_verify_fp(client_id));
+        let verify_fp = client.extract_cookie_val("s_v_web_id").unwrap_or_else(|| derive_dynamic_verify_fp(client_id));
         let ms_token = client.extract_cookie_val("msToken").unwrap_or_else(|| derive_ms_token(client_id));
-        let send_url = format!("https://imapi.douyin.com/v1/message/send?msToken={ms_token}");
+        let send_url = format!("https://imapi.douyin.com/v1/message/send?verifyFp={verify_fp}&fp={verify_fp}&msToken={ms_token}");
         let mut request=client.web_request(Method::POST, &send_url)?
             .header(header::CONTENT_TYPE,"application/x-protobuf").header(header::ACCEPT,"application/x-protobuf")
             .header("sec-ch-ua", crate::douyin::client::DEFAULT_SEC_CH_UA)

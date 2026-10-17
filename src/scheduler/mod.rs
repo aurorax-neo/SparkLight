@@ -1028,7 +1028,18 @@ impl SparkEngine {
             let Ok(client) = DouyinClient::new(&cookie, &account.alias) else {
                 continue;
             };
-            if client.load_web_context(&self.pool,&self.secret_box,&account.id,account.uid.as_deref()).await.is_err() { continue; }
+            client.load_web_context(&self.pool,&self.secret_box,&account.id,account.uid.as_deref()).await.ok();
+
+            // 真实 Web IM 心跳活跃维持与 Cookie 动态轮转
+            client.send_im_user_heartbeat().await.ok();
+            if client.is_cookie_changed() {
+                let refreshed = client.get_current_cookie();
+                if let Ok(enc) = self.secret_box.encrypt(refreshed.as_bytes()) {
+                    db::update_account_cookie(&self.pool, &account.id, &enc).await.ok();
+                    client.persist_web_context(&self.pool, &self.secret_box, &account.id).await.ok();
+                    tracing::info!(account = %account.alias, "心跳保活已动态同步最新 Cookie 凭证");
+                }
+            }
 
             if !sync_profiles {
                 continue;
