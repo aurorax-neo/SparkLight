@@ -316,6 +316,7 @@ pub async fn check_account(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"code": 500, "message": e.to_string()}))))?
         .ok_or_else(|| (StatusCode::NOT_FOUND, Json(json!({"code": 404, "message": "账号不存在"}))))?;
 
+    tracing::info!(account_alias = %account.alias, "用户在前端手动点击检测有效性，严格保持静默，不触发 Bark 推送");
     // 前台手动点击检测有效性为主动测试行为，结果直接在网页前端提示，严禁向 Bark 发送推送通知
     let is_valid = state.engine.check_account_cookie(&account, false).await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"code": 500, "message": e.to_string()}))))?;

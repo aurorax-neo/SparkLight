@@ -137,14 +137,11 @@ impl GuardKey {
                 (STANDARD.encode(mac.finalize().into_bytes()), "1")
             }
         };
-        let t_trust = match mode {
-            GuardMode::Ecdsa => Some(1),
-            GuardMode::Hmac { .. } => None,
-        };
+        let t_trust = Some(1);
         let payload = ClientData { ts_sign: &material.data.ts_sign, req_content: "ticket,path,timestamp", req_sign: &signature, timestamp, t_trust };
         let value = STANDARD.encode(serde_json::to_vec(&payload).context("GUARD_ENCODE_FAILED")?);
         let mut headers = HeaderMap::new();
-        for (name, text) in [("bd-ticket-guard-ree-public-key", material.public.as_str()), ("bd-ticket-guard-web-version", if material.data.ts_sign.starts_with("ts.1") { "1" } else { "2" }), ("bd-ticket-guard-web-sign-type", sign_type), ("bd-ticket-guard-version", "2"), ("bd-ticket-guard-iteration-version", "1"), ("bd-ticket-guard-client-data", value.as_str())] {
+        for (name, text) in [("bd-ticket-guard-ree-public-key", material.public.as_str()), ("bd-ticket-guard-web-version", if material.data.ts_sign.starts_with("ts.1") { "1" } else { "2" }), ("bd-ticket-guard-web-sign-type", sign_type), ("bd-ticket-guard-version", "2"), ("bd-ticket-guard-client-data", value.as_str())] {
             let mut header = HeaderValue::from_str(text).map_err(|_| anyhow::anyhow!("GUARD_INVALID_HEADER"))?;
             header.set_sensitive(true);
             headers.insert(name, header);
@@ -233,7 +230,8 @@ mod tests {
             assert_eq!(key.public_key_base64().len(),88);
             assert_eq!(headers["bd-ticket-guard-web-version"],if prefix=="ts.1" {"1"}else{"2"});
             assert_eq!(headers["bd-ticket-guard-web-sign-type"],"0");
-            assert_eq!(headers["bd-ticket-guard-iteration-version"],"1");
+            assert!(!headers.contains_key("bd-ticket-guard-iteration-version"));
+            assert_eq!(headers.len(), 5);
             assert!(headers.values().all(|v|v.is_sensitive()));
             let decoded=STANDARD.decode(headers["bd-ticket-guard-client-data"].as_bytes()).unwrap();
             let data:serde_json::Value=serde_json::from_slice(&decoded).unwrap();
@@ -241,6 +239,7 @@ mod tests {
             assert_eq!(data["timestamp"],1700000001);
             let sig=Signature::from_der(&STANDARD.decode(data["req_sign"].as_str().unwrap()).unwrap()).unwrap();
             let public=VerifyingKey::from(&SigningKey::from(&key.secret));
+            assert_eq!(data["t_trust"], 1);
             public.verify(b"ticket=offline-ticket&path=/v1/message/send&timestamp=1700000001",&sig).unwrap();
             assert!(public.verify(b"ticket=offline-ticket&path=/other&timestamp=1700000001",&sig).is_err());
         }
@@ -263,13 +262,14 @@ mod tests {
                 let expected = expected.as_str().map(str::to_owned).unwrap_or_else(||expected.to_string());
                 assert_eq!(headers.get(name).unwrap().to_str().unwrap(), expected);
             }
+            let data: serde_json::Value = serde_json::from_slice(&STANDARD.decode(headers["bd-ticket-guard-client-data"].as_bytes()).unwrap()).unwrap();
+            assert_eq!(data["ts_sign"], case["ts_sign"]);
+            assert_eq!(data["req_content"], case["input"]["req_content"]);
+            assert_eq!(data["timestamp"], case["input"]["timestamp"]);
+            assert_eq!(data["t_trust"], 1);
             if hmac {
-                assert_eq!(headers["bd-ticket-guard-client-data"].to_str().unwrap(), case["client_data_base64"].as_str().unwrap());
+                assert_eq!(data["req_sign"], case["signature_base64"].as_str().unwrap());
             } else {
-                let data: serde_json::Value = serde_json::from_slice(&STANDARD.decode(headers["bd-ticket-guard-client-data"].as_bytes()).unwrap()).unwrap();
-                assert_eq!(data["ts_sign"], case["ts_sign"]);
-                assert_eq!(data["req_content"], case["input"]["req_content"]);
-                assert_eq!(data["timestamp"], case["input"]["timestamp"]);
                 for signature in [data["req_sign"].as_str().unwrap(), case["signature_base64"].as_str().unwrap()] {
                     let signature = Signature::from_der(&STANDARD.decode(signature).unwrap()).unwrap();
                     public.verify(case["input"]["sign_data"].as_str().unwrap().as_bytes(), &signature).unwrap();

@@ -90,7 +90,7 @@ impl ConversationTicket {
 }
 fn initial_envelope(context:&[u8],body:&[u8])->Result<Vec<u8>> {
     let mut envelope=Vec::new();
-    encode_field_varint(1,100,&mut envelope);encode_field_varint(2,10001,&mut envelope);
+    encode_field_varint(1,100,&mut envelope);encode_field_varint(2,10015,&mut envelope);
     for (n,v) in [(3,"0.1.8"),(4,""),(7,"0d50935:feat/pc-im-group"),(11,"douyin_pc"),(21,"douyin_web"),(22,"web_sdk")] {encode_field_bytes(n,v.as_bytes(),&mut envelope);}
     for (n,v) in [(5,3),(6,0),(18,1)]{encode_field_varint(n,v,&mut envelope);}
     encode_field_bytes(8,body,&mut envelope);
