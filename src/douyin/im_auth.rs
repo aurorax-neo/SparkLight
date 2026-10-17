@@ -138,7 +138,13 @@ impl WebSessionContext {
         if now.checked_sub(acquired_at).is_none_or(|age| age > 86400 * 30) {
             return Ok(None);
         }
-        crate::douyin::pcim_guard::BoundGuardMaterial::from_saved(json, self.uid, cookie, acquired_at, &key.public_key_base64()).map(Some)
+        match crate::douyin::pcim_guard::BoundGuardMaterial::from_saved(json, self.uid, cookie, acquired_at, &key.public_key_base64()) {
+            Ok(mat) => Ok(Some(mat)),
+            Err(e) => {
+                tracing::warn!(error = %e, "保存的 GuardMaterial 与当前密钥不匹配或无效，忽略陈旧材料");
+                Ok(None)
+            }
+        }
     }
     pub fn get_dtrait_cipher(&self) -> Result<Option<crate::douyin::pcim_dtrait::DTraitCipher>> {
         let (Some(pem), Some(version)) = (self.dtrait_pk1_pem.as_deref(), self.dtrait_version.as_deref()) else {

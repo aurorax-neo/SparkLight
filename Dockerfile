@@ -1,6 +1,8 @@
 # Stage 1: Build binary using cached rust:bookworm
 FROM rust:bookworm AS builder
 ENV CARGO_REGISTRIES_CRATES_IO_PROTOCOL=sparse
+ARG http_proxy=http://172.17.0.1:7890
+ARG https_proxy=http://172.17.0.1:7890
 WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
@@ -9,6 +11,8 @@ RUN cargo build --release --bin sparklight
 
 # Stage 2: Runtime image
 FROM debian:bookworm-slim AS runtime
+ARG http_proxy=http://172.17.0.1:7890
+ARG https_proxy=http://172.17.0.1:7890
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates curl tini \
     && rm -rf /var/lib/apt/lists/* \

@@ -1,7 +1,7 @@
 export const TAMPERMONKEY_SCRIPT: string = `// ==UserScript==
 // @name         SparkLight 抖音凭证一键全自动提取助手
 // @namespace    https://sparklight.local/
-// @version      2.2.3
+// @version      2.2.4
 // @description  一键全自动提取抖音完整登录凭证（包含 HttpOnly Cookie 与 Guard 签名私钥/票据），100% 纯本地复制，免除手动抓包
 // @author       SparkLight
 // @match        https://*.douyin.com/*
@@ -31,6 +31,20 @@ export const TAMPERMONKEY_SCRIPT: string = `// ==UserScript==
           return hex;
         }
       }
+    } catch (_) {}
+    return '';
+  }
+
+  // 1.2 解析 PKCS8/SPKI EC 公钥 PEM 为 65 字节 SEC1 未压缩公钥 Base64
+  function pemToRawPubBase64(pem) {
+    if (!pem || typeof pem !== 'string') return '';
+    try {
+      const b64 = pem.replace(/-----[^-]+-----/g, '').replace(/\\s+/g, '');
+      const binary = atob(b64);
+      if (binary.length < 65) return '';
+      const raw = binary.slice(binary.length - 65);
+      if (raw.charCodeAt(0) !== 0x04) return '';
+      return btoa(raw);
     } catch (_) {}
     return '';
   }
@@ -196,10 +210,12 @@ export const TAMPERMONKEY_SCRIPT: string = `// ==UserScript==
           p = typeof p.data === 'string' ? JSON.parse(p.data) : p.data;
         }
         if (p && typeof p === 'object' && p.ticket && p.ts_sign && p.client_cert) {
+          const pubB64 = p.client_cert.startsWith('pub.') ? p.client_cert.slice(4) : p.client_cert;
           return {
             ticket: p.ticket,
             ts_sign: p.ts_sign,
             client_cert: p.client_cert,
+            pubB64: pubB64,
             log_id: p.log_id || '',
             create_time: Number(p.create_time) || 0,
           };
@@ -217,16 +233,44 @@ export const TAMPERMONKEY_SCRIPT: string = `// ==UserScript==
         }
         if (p && typeof p === 'object' && p.ec_privateKey) {
           const hex = pemToScalarHex(p.ec_privateKey);
+          const pubB64 = pemToRawPubBase64(p.ec_publicKey);
           if (hex) {
             return {
               privHex: hex,
               pubPem: p.ec_publicKey || '',
+              pubB64: pubB64,
             };
           }
         }
       } catch (_) {}
       return null;
     };
+
+    // 0. 尝试通过当前页面的 securitySDK 获取最新的密钥与票据状态
+    const win = typeof unsafeWindow !== 'undefined' ? unsafeWindow : (typeof window !== 'undefined' ? window : null);
+    if (win && win.securitySDK) {
+      try {
+        if (typeof win.securitySDK.getBdTicketGuardHeader === 'function') {
+          await win.securitySDK.getBdTicketGuardHeader({ path: '/v1/message/send' }).catch(() => null);
+        }
+        if (win.securitySDK.cryptoSDK && typeof win.securitySDK.cryptoSDK.getKeysInfo === 'function') {
+          for (const certType of ['web_protect', 'cookie', 'login', 'default']) {
+            const info = await win.securitySDK.cryptoSDK.getKeysInfo({ certType }).catch(() => null);
+            if (info && info.crypt) {
+              const k = parseKeyCandidate(info.crypt);
+              if (k) {
+                if (info.b64PubKey && !k.pubB64) k.pubB64 = info.b64PubKey;
+                candidateKeys.push(k);
+              }
+            }
+            if (info && info.sign && info.sign.ticket) {
+              const t = parseTicketCandidate(info.sign);
+              if (t) candidateTickets.push(t);
+            }
+          }
+        }
+      } catch (_) {}
+    }
 
     // 1. 扫描 localStorage
     try {
@@ -243,6 +287,15 @@ export const TAMPERMONKEY_SCRIPT: string = `// ==UserScript==
       if (tLogin) candidateTickets.push(tLogin);
     } catch (_) {}
 
+    // 1.1 扫描 Cookie 中的 server_data
+    if (cookieMap['bd_ticket_guard_server_data']) {
+      try {
+        const decoded = decodeURIComponent(cookieMap['bd_ticket_guard_server_data']);
+        const t = parseTicketCandidate(decoded);
+        if (t) candidateTickets.push(t);
+      } catch (_) {}
+    }
+
     // 2. 扫描 IndexedDB secure-store (cryptvalues)
     try {
       const idbItems = await readSecureStoreFromIndexedDB();
@@ -254,21 +307,51 @@ export const TAMPERMONKEY_SCRIPT: string = `// ==UserScript==
       }
     } catch (_) {}
 
-    // 按 create_time 降序排序，选取最新生成的票据，杜绝陈旧历史票据被误用
-    candidateTickets.sort((a, b) => b.create_time - a.create_time);
-    const bestTicket = candidateTickets[0] || null;
+    // 去重
+    const uniqueKeys = [];
+    const seenPriv = new Set();
+    for (const k of candidateKeys) {
+      if (k && k.privHex && !seenPriv.has(k.privHex)) {
+        seenPriv.add(k.privHex);
+        uniqueKeys.push(k);
+      }
+    }
 
-    let guardPrivHex = candidateKeys[0]?.privHex || '';
+    const uniqueTickets = [];
+    const seenTickets = new Set();
+    for (const t of candidateTickets) {
+      if (t && t.ticket && !seenTickets.has(t.ticket)) {
+        seenTickets.add(t.ticket);
+        uniqueTickets.push(t);
+      }
+    }
+
+    // 严格按公钥绑定匹配 (Key, Ticket) 组合，杜绝私钥与票据公钥不匹配
+    uniqueTickets.sort((a, b) => b.create_time - a.create_time);
+    let matchedPair = null;
+    for (const t of uniqueTickets) {
+      const matchKey = uniqueKeys.find((k) => k.pubB64 && k.pubB64 === t.pubB64);
+      if (matchKey) {
+        matchedPair = { key: matchKey, ticket: t };
+        break;
+      }
+    }
+
+    let guardPrivHex = '';
     let guardServerData = '';
 
-    if (bestTicket) {
+    if (matchedPair) {
+      guardPrivHex = matchedPair.key.privHex;
       guardServerData = JSON.stringify({
-        ticket: bestTicket.ticket,
-        ts_sign: bestTicket.ts_sign,
-        client_cert: bestTicket.client_cert,
-        log_id: bestTicket.log_id || '',
-        create_time: bestTicket.create_time || 0,
+        ticket: matchedPair.ticket.ticket,
+        ts_sign: matchedPair.ticket.ts_sign,
+        client_cert: matchedPair.ticket.client_cert,
+        log_id: matchedPair.ticket.log_id || '',
+        create_time: matchedPair.ticket.create_time || 0,
       });
+    } else if (uniqueKeys.length > 0) {
+      // 存在私钥但未找到匹配的已下发票据（如浏览器自动轮换密钥），提取私钥但留空票据，由服务端发送时按规范协商
+      guardPrivHex = uniqueKeys[0].privHex;
     }
 
     // 采集当前登录用户的标识与昵称
@@ -301,7 +384,7 @@ export const TAMPERMONKEY_SCRIPT: string = `// ==UserScript==
     // 组装全量凭证结构
     const payload = {
       type: 'sparklight_credential',
-      version: '2.2.0',
+      version: '2.2.4',
       extracted_at: new Date().toISOString(),
       uid: userInfo.uid,
       nickname: userInfo.nickname,
@@ -320,7 +403,13 @@ export const TAMPERMONKEY_SCRIPT: string = `// ==UserScript==
       prompt('请按 Cmd+C (或 Ctrl+C) 复制凭证：', textToCopy);
     }
 
-    showToast(\`✅ 已成功复制「\${userInfo.nickname || '抖音账号'}」全量凭证（含 Cookie 与 Guard 私钥）！请前往 SparkLight 控制台直接粘贴。\`);
+    if (matchedPair) {
+      showToast(\`✅ 已成功复制「\${userInfo.nickname || '抖音账号'}」全量凭证（已绑定 Guard 签名公钥 \${matchedPair.key.pubB64.slice(0, 8)}...）！请前往 SparkLight 控制台直接粘贴。\`);
+    } else if (guardPrivHex) {
+      showToast(\`⚠️ 已提取私钥，但安全票据尚未与当前公钥配对。建议在抖音网页点击对话或发送消息刷新票据后再提取！\`, false, 5000);
+    } else {
+      showToast(\`✅ 已成功复制「\${userInfo.nickname || '抖音账号'}」Cookie 凭证！请前往 SparkLight 控制台直接粘贴。\`);
+    }
     return true;
   }
 

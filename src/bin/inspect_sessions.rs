@@ -50,6 +50,12 @@ async fn main() -> Result<()> {
                     keys.contains(&"msToken"),
                     keys.contains(&"d_ticket")
                 );
+                for item in cookie_str.split(';') {
+                    let p = item.trim();
+                    if p.starts_with("bd_ticket_guard_") || p.starts_with("_bd_ticket_crypt_") {
+                        println!("    Cookie Guard Item: {}", p);
+                    }
+                }
             }
         }
 
@@ -65,6 +71,11 @@ async fn main() -> Result<()> {
                     println!("  WebContext Found:");
                     let has_guard_secret = ctx.get("guard_secret_hex").and_then(|v| v.as_str()).is_some();
                     println!("    guard_secret_hex: {}", if has_guard_secret { "PRESENT" } else { "NONE" });
+                    if let Some(hex) = ctx.get("guard_secret_hex").and_then(|v| v.as_str()) {
+                        if let Ok(key) = sparklight::douyin::pcim_guard::GuardKey::from_hex(hex) {
+                            println!("    derived public_key: {}", key.public_key_base64());
+                        }
+                    }
                     let guard_acquired_at = ctx.get("guard_acquired_at").and_then(|v| v.as_i64());
                     println!("    guard_acquired_at: {:?} (age: {:?}s)", guard_acquired_at, guard_acquired_at.map(|t| now - t));
 
