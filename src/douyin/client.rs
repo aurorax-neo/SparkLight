@@ -333,8 +333,9 @@ impl DouyinClient {
         let uid=self.verified_sender_uid(expected_uid)?;
         let cookie=self.get_current_cookie();
         let now=chrono::Utc::now().timestamp();
+        let existing_ctx = self.web_context.lock().unwrap().clone();
         #[allow(unused_mut)]
-        if let Some(mut ctx) = self.web_context.lock().unwrap().clone() {
+        if let Some(mut ctx) = existing_ctx {
             if ctx.validate_session(uid, &cookie).is_ok() && ctx.has_identity() {
                 #[cfg(not(test))]
                 {
@@ -500,7 +501,8 @@ impl DouyinClient {
         let version = data.get("x-tt-session-dtrait-pk1-version").and_then(serde_json::Value::as_str).context("DTRAIT_VERSION_MISSING")?;
         let pem_bytes = base64::engine::general_purpose::STANDARD.decode(public_b64).context("DTRAIT_DECODE_FAILED")?;
         let pem = String::from_utf8(pem_bytes).context("DTRAIT_PEM_INVALID")?;
-        if let Some(mut ctx) = self.web_context.lock().unwrap().clone() {
+        let existing_ctx = self.web_context.lock().unwrap().clone();
+        if let Some(mut ctx) = existing_ctx {
             ctx.set_dtrait_config(&pem, version);
             self.set_web_context(ctx)?;
         }
