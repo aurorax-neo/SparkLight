@@ -477,6 +477,7 @@ pub async fn sync_from_browser(
     Path(id): Path<String>,
     Json(req): Json<SyncBrowserReq>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
+    state.engine.record_manual_action();
     let clean = req.cookie.trim();
     if clean.is_empty() {
         return Err((StatusCode::BAD_REQUEST, Json(json!({"code": 400, "message": "Cookie 内容不能为空"}))));
@@ -533,6 +534,7 @@ pub struct ImportImCredentialReq {
 pub async fn import_im_credential(
     State(state): State<AppState>, Path(id): Path<String>, Json(req): Json<ImportImCredentialReq>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
+    state.engine.record_manual_action();
     let bad = |message: String| (StatusCode::BAD_REQUEST, Json(json!({"code":400,"message":message})));
     let internal = |_| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"code":500,"message":"IM 凭证加密保存失败"})));
     let account = db::get_account(&state.pool, &id).await.map_err(|_| bad("账号查询失败".into()))?

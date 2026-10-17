@@ -212,12 +212,14 @@ impl SparkEngine {
     pub fn new(
         pool: SqlitePool,
         secret_box: SecretBox,
-        notifier: BarkNotifier,
+        mut notifier: BarkNotifier,
         schedule_time: String,
         min_delay_secs: u64,
         max_delay_secs: u64,
         max_retries: u32,
     ) -> Self {
+        let last_manual_action = Arc::new(AtomicI64::new(0));
+        notifier.set_silence_timestamp(last_manual_action.clone());
         Self {
             pool,
             secret_box,
@@ -227,7 +229,7 @@ impl SparkEngine {
             settings_update_lock: Arc::new(Mutex::new(())),
             max_retries: Arc::new(AtomicU32::new(max_retries)),
             is_running: Arc::new(AtomicBool::new(false)),
-            last_manual_action: Arc::new(AtomicI64::new(0)),
+            last_manual_action,
         }
     }
 
@@ -1027,17 +1029,6 @@ impl SparkEngine {
                 continue;
             };
             if client.load_web_context(&self.pool,&self.secret_box,&account.id,account.uid.as_deref()).await.is_err() { continue; }
-
-            // 执行官方 Token Beat 会话延寿保活
-            let beat_ok = client.passport_token_beat("polling").await.unwrap_or(false);
-            if beat_ok && client.is_cookie_changed() {
-                let refreshed_cookie = client.get_current_cookie();
-                if let Ok(new_encrypted) = self.secret_box.encrypt(refreshed_cookie.as_bytes()) {
-                    db::update_account_cookie(&self.pool, &account.id, &new_encrypted).await.ok();
-                    client.persist_web_context(&self.pool, &self.secret_box, &account.id).await.ok();
-                    tracing::info!(account = %account.alias, "TokenBeat 保活成功，已更新 Cookie 与 Web 凭据");
-                }
-            }
 
             if !sync_profiles {
                 continue;

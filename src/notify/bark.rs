@@ -1,3 +1,5 @@
+use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use reqwest::Client;
@@ -9,6 +11,7 @@ pub struct BarkNotifier {
     client: Client,
     pub default_server: String,
     pub default_key: Option<String>,
+    pub manual_silence_timestamp: Arc<AtomicI64>,
 }
 
 #[derive(Serialize)]
@@ -33,7 +36,12 @@ impl BarkNotifier {
             client,
             default_server,
             default_key,
+            manual_silence_timestamp: Arc::new(AtomicI64::new(0)),
         }
+    }
+
+    pub fn set_silence_timestamp(&mut self, timestamp: Arc<AtomicI64>) {
+        self.manual_silence_timestamp = timestamp;
     }
 
     pub async fn send_notification(
@@ -43,6 +51,16 @@ impl BarkNotifier {
         body: &str,
         jump_url: Option<&str>,
     ) -> Result<()> {
+        let last = self.manual_silence_timestamp.load(Ordering::Relaxed);
+        if last > 0 {
+            let now = chrono::Utc::now().timestamp();
+            let diff = now - last;
+            if (0..=1800).contains(&diff) {
+                tracing::info!(diff_secs = diff, "Bark 推送已物理拦截：处于前台手动操作静默期 (30分钟窗口内)");
+                return Ok(());
+            }
+        }
+
         let target_key = key_override
             .filter(|k| !k.trim().is_empty())
             .or(self.default_key.as_deref().filter(|k| !k.trim().is_empty()));

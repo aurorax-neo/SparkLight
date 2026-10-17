@@ -250,3 +250,48 @@ async fn test_manual_run_account_and_run_all_do_not_trigger_bark() {
     let accept_result = tokio::time::timeout(std::time::Duration::from_millis(150), listener.accept()).await;
     assert!(accept_result.is_err(), "前台手动立即执行全量续火花严禁向 Bark 发送通知");
 }
+
+#[tokio::test]
+async fn test_bark_notifier_physical_silence_window() {
+    use std::sync::atomic::{AtomicI64, Ordering};
+    use std::sync::Arc;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+
+    let mut notifier = BarkNotifier::new(format!("http://127.0.0.1:{port}"), Some("test_bark_key".into()));
+    let silence = Arc::new(AtomicI64::new(0));
+    notifier.set_silence_timestamp(silence.clone());
+
+    // 1. 静默时间戳为 0（无手动操作），正常发送（会尝试连接 listener）
+    let handle = tokio::spawn({
+        let n = notifier.clone();
+        async move {
+            n.send_notification(None, "标题", "内容", None).await
+        }
+    });
+    let accept_result = tokio::time::timeout(std::time::Duration::from_millis(500), listener.accept()).await;
+    assert!(accept_result.is_ok(), "无手动操作时应正常尝试发送 Bark 推送");
+    handle.abort();
+
+    // 2. 模拟前台手动操作刚刚触发（当前时间戳）
+    let now = chrono::Utc::now().timestamp();
+    silence.store(now, Ordering::Relaxed);
+
+    let send_res = notifier.send_notification(None, "标题", "内容", None).await;
+    assert!(send_res.is_ok(), "静默期内应直接返回 Ok(())");
+    let accept_result = tokio::time::timeout(std::time::Duration::from_millis(150), listener.accept()).await;
+    assert!(accept_result.is_err(), "静默期内（30分钟）严禁向 Bark 发送任何 HTTP 请求");
+
+    // 3. 模拟 31 分钟前的手动操作（超出 1800 秒静默窗）
+    silence.store(now - 1900, Ordering::Relaxed);
+    let handle = tokio::spawn({
+        let n = notifier.clone();
+        async move {
+            n.send_notification(None, "标题", "内容", None).await
+        }
+    });
+    let accept_result = tokio::time::timeout(std::time::Duration::from_millis(500), listener.accept()).await;
+    assert!(accept_result.is_ok(), "静默期结束后应恢复正常发送");
+    handle.abort();
+}

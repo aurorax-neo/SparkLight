@@ -66,7 +66,9 @@ impl ConversationTicket {
                     self.uid,
                     &current_cookie,
                     now,
-                    crate::douyin::pcim_guard::GuardMode::Ecdsa,
+                    crate::douyin::pcim_guard::GuardMode::Hmac {
+                        server_spki_der: crate::douyin::pcim_guard::OFFICIAL_SERVER_SPKI_DER,
+                    },
                 )?;
                 for (name, value) in headers {
                     if let Some(n) = name { request.headers_mut().insert(n, value); }
