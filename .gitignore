@@ -24,6 +24,7 @@ local.env
 
 # Agent & Workspace State
 .pi/
+deploy_release.tar.gz
 
 # System & OS
 .DS_Store
