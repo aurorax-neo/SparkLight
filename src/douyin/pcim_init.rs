@@ -25,6 +25,9 @@ impl ConversationTicket {
         self.build_pcim_auth_request(client, &GuardSendAuth::Signed { key: GuardKey::from_slice(&key.to_bytes())?, material: material.clone() }, client_id, text)
     }
     pub(crate) fn build_pcim_auth_request(&self, client: &DouyinClient, auth: &GuardSendAuth, client_id: &str, text: &str) -> Result<reqwest::Request> {
+        self.build_pcim_auth_request_with_ts(client, auth, client_id, text, None)
+    }
+    pub(crate) fn build_pcim_auth_request_with_ts(&self, client: &DouyinClient, auth: &GuardSendAuth, client_id: &str, text: &str, ts_override: Option<i64>) -> Result<reqwest::Request> {
         anyhow::ensure!(!text.trim().is_empty() && text.len()<=4096, "PCIM_INIT_TEXT");
         anyhow::ensure!(self.is_current(client) && !client.sending_blocked(), "PCIM_INIT_CONTEXT");
         anyhow::ensure!(uuid::Uuid::parse_str(client_id).is_ok_and(|u|u.get_version_num()==4 && u.to_string()==client_id), "PCIM_INIT_UUID");
@@ -55,7 +58,7 @@ impl ConversationTicket {
             .body(envelope).build()?;
         match auth {
             GuardSendAuth::Signed { key, material } => {
-                let now = chrono::Utc::now().timestamp();
+                let now = ts_override.unwrap_or_else(|| chrono::Utc::now().timestamp());
                 material.validate_freshness(now)?;
                 key.verify_binding(material)?;
                 let headers = key.sign_send(
@@ -80,7 +83,8 @@ impl ConversationTicket {
             protocol.add_bool("bool_1", true);
             protocol.add_hash("str_1", crate::douyin::pcim_features::murmur3("douyin_web"));
             let (central, _) = protocol.result();
-            if let Ok(hdr) = cipher.central_header(&central, "/v1/message/send", &[], chrono::Utc::now().timestamp()) {
+            let ts = ts_override.unwrap_or_else(|| chrono::Utc::now().timestamp());
+            if let Ok(hdr) = cipher.central_header(&central, "/v1/message/send", &[], ts) {
                 request.headers_mut().insert("x-tt-session-dtrait", hdr);
             }
         }
@@ -390,7 +394,12 @@ impl DouyinClient {
             let auth = GuardSendAuth::Signed { key, material };
             let client_id = uuid::Uuid::new_v4().to_string();
             stage = "BUILD";
-            let request = ticket.build_pcim_auth_request(self,&auth,&client_id,text)?;
+            let trusted_ts = self.get_trusted_timestamp(binding.uid).await
+                .unwrap_or_else(|e| {
+                    tracing::warn!(error = %e, "拉取官方授信时间失败，回退使用本机时间戳");
+                    chrono::Utc::now().timestamp()
+                });
+            let request = ticket.build_pcim_auth_request_with_ts(self, &auth, &client_id, text, Some(trusted_ts))?;
             let submission = InitialSubmission { ticket:&ticket,binding:&binding,auth:&auth,client_id:&client_id,day };
             let auth_kind = match &auth {
                 GuardSendAuth::Signed { key, material } => format!("Signed(pub={},mat_age={})", &key.public_key_base64()[..8], chrono::Utc::now().timestamp() - material.acquired_at()),

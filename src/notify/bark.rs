@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use anyhow::{Context, Result, bail};
@@ -12,6 +12,7 @@ pub struct BarkNotifier {
     pub default_server: String,
     pub default_key: Option<String>,
     pub manual_silence_timestamp: Arc<AtomicI64>,
+    pub scheduler_alert_enabled: Arc<AtomicBool>,
 }
 
 #[derive(Serialize)]
@@ -37,11 +38,16 @@ impl BarkNotifier {
             default_server,
             default_key,
             manual_silence_timestamp: Arc::new(AtomicI64::new(0)),
+            scheduler_alert_enabled: Arc::new(AtomicBool::new(false)),
         }
     }
 
     pub fn set_silence_timestamp(&mut self, timestamp: Arc<AtomicI64>) {
         self.manual_silence_timestamp = timestamp;
+    }
+
+    pub fn set_scheduler_alert_enabled(&self, enabled: bool) {
+        self.scheduler_alert_enabled.store(enabled, Ordering::Relaxed);
     }
 
     pub async fn send_notification(
@@ -51,6 +57,11 @@ impl BarkNotifier {
         body: &str,
         jump_url: Option<&str>,
     ) -> Result<()> {
+        if !self.scheduler_alert_enabled.load(Ordering::Relaxed) {
+            tracing::info!("Bark 推送已物理硬拦截：当前非每日定时任务执行期，严禁向 Bark 发送任何告警通知");
+            return Ok(());
+        }
+
         let last = self.manual_silence_timestamp.load(Ordering::Relaxed);
         if last > 0 {
             let now = chrono::Utc::now().timestamp();
@@ -119,6 +130,11 @@ impl BarkNotifier {
         reason: &str,
         key_override: Option<&str>,
     ) -> Result<()> {
+        if !self.scheduler_alert_enabled.load(Ordering::Relaxed) {
+            tracing::info!("Bark 失效告警已物理硬拦截：当前非每日定时任务执行期，严禁向 Bark 发送任何告警通知");
+            return Ok(());
+        }
+
         let last = self.manual_silence_timestamp.load(Ordering::Relaxed);
         if last > 0 {
             let now = chrono::Utc::now().timestamp();

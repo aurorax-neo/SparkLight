@@ -346,6 +346,7 @@ async fn test_bark_notifier_physical_silence_window() {
     let port = listener.local_addr().unwrap().port();
 
     let mut notifier = BarkNotifier::new(format!("http://127.0.0.1:{port}"), Some("test_bark_key".into()));
+    notifier.set_scheduler_alert_enabled(true);
     let silence = Arc::new(AtomicI64::new(0));
     notifier.set_silence_timestamp(silence.clone());
 
@@ -380,4 +381,25 @@ async fn test_bark_notifier_physical_silence_window() {
     let accept_result = tokio::time::timeout(std::time::Duration::from_millis(500), listener.accept()).await;
     assert!(accept_result.is_ok(), "静默期结束后应恢复正常发送");
     handle.abort();
+}
+
+#[tokio::test]
+async fn test_bark_notifier_strict_physical_gate_outside_daily_scheduler() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+
+    // 默认创建的 notifier，scheduler_alert_enabled 为 false
+    let notifier = BarkNotifier::new(format!("http://127.0.0.1:{port}"), Some("test_bark_key".into()));
+
+    // 1. 在非每日任务期间，即便没有任何静默时间戳（last=0），也必须物理阻断
+    let res = notifier.send_notification(None, "手动操作通知", "内容", None).await;
+    assert!(res.is_ok());
+    let accept_result = tokio::time::timeout(std::time::Duration::from_millis(150), listener.accept()).await;
+    assert!(accept_result.is_err(), "非每日定时任务期，send_notification 必须 100% 物理拦截");
+
+    // 2. Cookie 失效告警在非每日任务期间也必须物理阻断
+    let res = notifier.send_cookie_expired_alert("测试账号", Some("昵称"), "Cookie 失效", None).await;
+    assert!(res.is_ok());
+    let accept_result = tokio::time::timeout(std::time::Duration::from_millis(150), listener.accept()).await;
+    assert!(accept_result.is_err(), "非每日定时任务期，send_cookie_expired_alert 必须 100% 物理拦截");
 }

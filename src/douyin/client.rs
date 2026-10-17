@@ -35,6 +35,7 @@ pub struct DouyinClient {
     send_claim: Mutex<Option<(sqlx::SqlitePool,String,String,Vec<u8>)>>,
     send_history: Mutex<HashMap<String,(u64,i32,chrono::NaiveDate,bool)>>,
     pcim_initial: Mutex<Option<session_auth::pcim_init::InitialBinding>>,
+    trusted_time: Mutex<Option<crate::douyin::sdk_time::TrustedTimeAnchor>>,
 }
 
 /// 清洗与提取完整 Cookie 字符串（支持直接粘贴 cURL 命令或纯 32 位 sessionid）
@@ -168,6 +169,7 @@ impl DouyinClient {
             send_claim: Mutex::new(None),
             send_history: Mutex::new(HashMap::new()),
             pcim_initial: Mutex::new(None),
+            trusted_time: Mutex::new(None),
         })
     }
 
@@ -328,69 +330,51 @@ impl DouyinClient {
             context.history_status(uid, &self.get_current_cookie(), chrono::Utc::now().timestamp()))
     }
 
-    /// 模拟真实 Web 端 IM 用户活跃心跳 (https://www-hj.douyin.com/aweme/v1/web/im/user/active/update/)
-    /// 维持账号在抖音 Web 端在线状态，吸收最新下发的 Cookie (如 ttwid 等)
-    pub async fn send_im_user_heartbeat(&self) -> Result<()> {
-        let ms_token = self.extract_cookie_val("msToken").unwrap_or_else(|| {
-            use rand::Rng;
-            const CHARSET: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_";
-            let mut rng = rand::thread_rng();
-            (0..176).map(|_| { let idx = rng.gen_range(0..CHARSET.len()); CHARSET[idx] as char }).collect()
-        });
-        let verify_fp = self.extract_cookie_val("s_v_web_id").unwrap_or_default();
-        let request = self.web_request(Method::GET, "https://www-hj.douyin.com/aweme/v1/web/im/user/active/update/")?
-            .query(&[
-                ("device_platform", "webapp"),
-                ("aid", "6383"),
-                ("channel", "channel_pc_web"),
-                ("action", "heartbeat"),
-                ("new_user_login", "0"),
-                ("update_version_code", "170400"),
-                ("pc_client_type", "1"),
-                ("pc_libra_divert", "Mac"),
-                ("support_h265", "1"),
-                ("support_dash", "1"),
-                ("cpu_core_num", "8"),
-                ("version_code", "170400"),
-                ("version_name", "17.4.0"),
-                ("cookie_enabled", "true"),
-                ("screen_width", "1920"),
-                ("screen_height", "1080"),
-                ("browser_language", "zh-CN"),
-                ("browser_platform", "MacIntel"),
-                ("browser_name", "Chrome"),
-                ("browser_version", "133.0.0.0"),
-                ("browser_online", "true"),
-                ("engine_name", "Blink"),
-                ("engine_version", "133.0.0.0"),
-                ("os_name", "Mac+OS"),
-                ("os_version", "10.15.7"),
-                ("device_memory", "8"),
-                ("platform", "PC"),
-                ("msToken", &ms_token),
-                ("verifyFp", &verify_fp),
-                ("fp", &verify_fp),
-            ])
-            .header("accept", "application/json, text/plain, */*")
-            .header("referer", "https://www.douyin.com/")
-            .header("sec-ch-ua", DEFAULT_SEC_CH_UA)
-            .header("sec-ch-ua-mobile", DEFAULT_SEC_CH_UA_MOBILE)
-            .header("sec-ch-ua-platform", DEFAULT_SEC_CH_UA_PLATFORM)
-            .header("sec-fetch-dest", "empty")
-            .header("sec-fetch-mode", "cors")
-            .header("sec-fetch-site", "same-site");
-
-        let response = self.execute_web(request.build()?).await;
-        if let Ok((headers, bytes, _guard)) = response {
-            self.merge_response_headers(&headers);
-            if let Ok(json) = serde_json::from_slice::<serde_json::Value>(&bytes) {
-                if json.get("status_code").and_then(|c| c.as_i64()) == Some(0) {
-                    tracing::debug!(account = %self.account_alias, "Web IM 心跳保活上报成功");
-                    return Ok(());
+    /// 获取官方服务端授信单调时间戳；如无有效锚点则自动从官方端点拉取。
+    pub async fn get_trusted_timestamp(&self, uid: u64) -> Result<i64> {
+        let cookie = self.get_current_cookie();
+        {
+            let lock = self.trusted_time.lock().unwrap();
+            if let Some(anchor) = lock.as_ref() {
+                if let Ok(ts) = anchor.timestamp(uid, &cookie) {
+                    return Ok(ts);
                 }
             }
         }
-        Ok(())
+        self.fetch_trusted_time(uid).await
+    }
+
+    /// 从官方 Passport 授信时间端点拉取最新时间锚点
+    pub async fn fetch_trusted_time(&self, uid: u64) -> Result<i64> {
+        let cookie = self.get_current_cookie();
+        let url_str = "https://www.douyin.com/passport/user_info/get_sec_ts/?aid=6383&is_from_ttaccountsdk=1";
+        let url = reqwest::Url::parse(url_str)?;
+        let request = self.web_request_allow_probe(Method::POST, url_str)?
+            .header("accept", "application/json, text/plain, */*")
+            .header("content-length", "0");
+        let started = std::time::Instant::now();
+        let response = self.client.execute(request.build()?).await?;
+        let received = std::time::Instant::now();
+        let received_wall = std::time::SystemTime::now();
+        let status = response.status();
+        let headers = response.headers().clone();
+        self.merge_response_headers(&headers);
+
+        let anchor = crate::douyin::sdk_time::TrustedTimeAnchor::from_response(
+            uid,
+            &cookie,
+            &url,
+            &Method::POST,
+            status,
+            &headers,
+            started,
+            received,
+            received_wall,
+        )?;
+        let ts = anchor.timestamp(uid, &cookie)?;
+        *self.trusted_time.lock().unwrap() = Some(anchor);
+        tracing::debug!(uid = uid, ts = ts, "已获取官方授信时间锚点");
+        Ok(ts)
     }
 
     /// 独立获取官方身份 Token；不生成发送签名或一次性发送授权。

@@ -993,6 +993,14 @@ pub fn start_daily_scheduler(engine: Arc<SparkEngine>) {
 
                     let engine_clone = engine.clone();
                     tokio::spawn(async move {
+                        engine_clone.notifier.set_scheduler_alert_enabled(true);
+                        struct AlertGuard(Arc<SparkEngine>);
+                        impl Drop for AlertGuard {
+                            fn drop(&mut self) {
+                                self.0.notifier.set_scheduler_alert_enabled(false);
+                            }
+                        }
+                        let _alert_guard = AlertGuard(engine_clone.clone());
                         match engine_clone.execute_all_accounts(false, true).await {
                             Err(_) => tracing::error!("每日自动续火花执行失败（任务未完成）"),
                             Ok(summary) => match summary.status {
@@ -1030,8 +1038,6 @@ impl SparkEngine {
             };
             client.load_web_context(&self.pool,&self.secret_box,&account.id,account.uid.as_deref()).await.ok();
 
-            // 真实 Web IM 心跳活跃维持与 Cookie 动态轮转
-            client.send_im_user_heartbeat().await.ok();
             if client.is_cookie_changed() {
                 let refreshed = client.get_current_cookie();
                 if let Ok(enc) = self.secret_box.encrypt(refreshed.as_bytes()) {
@@ -1390,6 +1396,8 @@ mod diagnostic_tests {
             updated_at: Utc::now(),
         };
         db::insert_account(&engine.pool, &account).await.unwrap();
+
+        engine.notifier.set_scheduler_alert_enabled(true);
 
         // 1. 静默检测（notify_on_failure = false）：必须不向 Bark 发送任何网络请求
         let is_valid = engine.check_account_cookie(&account, false).await.unwrap();
