@@ -73,8 +73,8 @@ def main():
             print('Web Context:')
             print(f'  UID in ctx: {ctx_data.get("uid")}')
             print(f'  guard_secret_hex present: {bool(ctx_data.get("guard_secret_hex"))}')
-            print(f'  guard_acquired_at: {ctx_data.get("guard_acquired_at")} (age: {now - ctx_data.get("guard_acquired_at", 0)}s)')
-            print(f'  identity_acquired_at: {ctx_data.get("identity_acquired_at")} (age: {now - ctx_data.get("identity_acquired_at", 0)}s)')
+            print(f'  guard_acquired_at: {ctx_data.get("guard_acquired_at")} (age: {now - (ctx_data.get("guard_acquired_at") or 0)}s)')
+            print(f'  identity_acquired_at: {ctx_data.get("identity_acquired_at")} (age: {now - (ctx_data.get("identity_acquired_at") or 0)}s)')
             gsd = ctx_data.get('guard_server_data')
             if gsd:
                 try:

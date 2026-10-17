@@ -16,7 +16,11 @@ use super::types::{CheckCookieResult, DouyinFriend, DouyinUserProfile, SendSpark
 #[path = "web.rs"]
 mod web;
 pub(crate) const DEFAULT_USER_AGENT: &str =
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36";
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36";
+pub(crate) const DEFAULT_SEC_CH_UA: &str =
+    "\"Brave\";v=\"155\", \"Chromium\";v=\"155\", \"Not(A:Brand\";v=\"24\"";
+pub(crate) const DEFAULT_SEC_CH_UA_MOBILE: &str = "?0";
+pub(crate) const DEFAULT_SEC_CH_UA_PLATFORM: &str = "\"macOS\"";
 
 pub struct DouyinClient {
     client: Client,
@@ -198,6 +202,18 @@ impl DouyinClient {
             "sec-fetch-site",
             header::HeaderValue::from_static("same-origin"),
         );
+        headers.insert(
+            "sec-ch-ua",
+            header::HeaderValue::from_static(DEFAULT_SEC_CH_UA),
+        );
+        headers.insert(
+            "sec-ch-ua-mobile",
+            header::HeaderValue::from_static(DEFAULT_SEC_CH_UA_MOBILE),
+        );
+        headers.insert(
+            "sec-ch-ua-platform",
+            header::HeaderValue::from_static(DEFAULT_SEC_CH_UA_PLATFORM),
+        );
 
 
         let mut builder = Client::builder()
@@ -334,9 +350,9 @@ impl DouyinClient {
                 ("is_from_ttaccountsdk","1"),("language","zh"),("msToken",&ms_token)])
             .header("x-tt-passport-csrf-token",self.extract_cookie_val("passport_csrf_token").or_else(||self.extract_cookie_val("passport_csrf_token_default")).unwrap_or_default())
             .header("x-tt-passport-trace-id",&biz_trace_id)
-            .header("sec-ch-ua", "\"Brave\";v=\"155\", \"Chromium\";v=\"155\", \"Not(A:Brand\";v=\"24\"")
-            .header("sec-ch-ua-mobile", "?0")
-            .header("sec-ch-ua-platform", "\"macOS\"")
+            .header("sec-ch-ua", DEFAULT_SEC_CH_UA)
+            .header("sec-ch-ua-mobile", DEFAULT_SEC_CH_UA_MOBILE)
+            .header("sec-ch-ua-platform", DEFAULT_SEC_CH_UA_PLATFORM)
             .header("accept", "application/json, text/javascript");
         let response=self.web_json(request).await?;
         let old_ctx = self.web_context.lock().unwrap().clone();

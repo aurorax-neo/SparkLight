@@ -48,9 +48,9 @@ impl ConversationTicket {
         let send_url = format!("https://imapi.douyin.com/v1/message/send?verifyFp={verify_fp}&fp={verify_fp}&msToken={ms_token}");
         let mut request=client.web_request(Method::POST, &send_url)?
             .header(header::CONTENT_TYPE,"application/x-protobuf").header(header::ACCEPT,"application/x-protobuf")
-            .header("sec-ch-ua", "\"Chromium\";v=\"133\", \"Not(A:Brand\";v=\"99\", \"Google Chrome\";v=\"133\"")
-            .header("sec-ch-ua-mobile", "?0")
-            .header("sec-ch-ua-platform", "\"macOS\"")
+            .header("sec-ch-ua", crate::douyin::client::DEFAULT_SEC_CH_UA)
+            .header("sec-ch-ua-mobile", crate::douyin::client::DEFAULT_SEC_CH_UA_MOBILE)
+            .header("sec-ch-ua-platform", crate::douyin::client::DEFAULT_SEC_CH_UA_PLATFORM)
             .header("sec-fetch-dest", "empty")
             .header("sec-fetch-mode", "cors")
             .header("sec-fetch-site", "same-site")
@@ -391,7 +391,16 @@ impl DouyinClient {
                     return Err(error);
                 }
             };
-            if let Some(new_mat) = auth.key().bind_response_headers(&headers, binding.uid, &self.get_current_cookie(), chrono::Utc::now().timestamp())? {
+            let mut new_mat = auth.key().bind_response_headers(&headers, binding.uid, &self.get_current_cookie(), chrono::Utc::now().timestamp())?;
+            if new_mat.is_none() {
+                for h in headers.get_all(header::SET_COOKIE).iter().filter_map(|h| h.to_str().ok()) {
+                    if let Ok(Some(mat)) = auth.key().bind_server_cookie(h, binding.uid, &self.get_current_cookie(), chrono::Utc::now().timestamp()) {
+                        new_mat = Some(mat);
+                        break;
+                    }
+                }
+            }
+            if let Some(new_mat) = new_mat {
                 let existing_ctx = self.web_context.lock().unwrap().clone();
                 if let Some(mut ctx) = existing_ctx {
                     ctx.set_guard_material(&new_mat)?;

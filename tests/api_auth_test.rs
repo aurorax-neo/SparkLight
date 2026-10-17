@@ -252,6 +252,92 @@ async fn test_manual_run_account_and_run_all_do_not_trigger_bark() {
 }
 
 #[tokio::test]
+async fn test_manual_test_target_does_not_trigger_bark() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+
+    let pool = db::init_pool("sqlite::memory:").await.unwrap();
+    let secret_box = SecretBox::new(&[19u8; 32]);
+    let notifier = BarkNotifier::new(format!("http://127.0.0.1:{port}"), Some("test_bark_key".into()));
+    let engine = Arc::new(SparkEngine::new(
+        pool.clone(),
+        secret_box.clone(),
+        notifier,
+        "09:30".into(),
+        5,
+        15,
+        3,
+    ));
+
+    let valid_api_key = "sk_test_manual_target_123".to_string();
+    let state = AppState {
+        pool: pool.clone(),
+        secret_box: secret_box.clone(),
+        engine,
+        api_key: Arc::new(valid_api_key.clone()),
+    };
+
+    let router = create_router(state);
+
+    let account = sparklight::model::Account {
+        id: "acc_target_test".into(),
+        alias: "目标测试账号".into(),
+        sec_uid: None,
+        uid: Some("12345678".into()),
+        nickname: Some("测试昵称".into()),
+        avatar_url: None,
+        encrypted_cookie: vec![9, 8, 7], // 无效加密数据，解密必失败
+        status: "ACTIVE".into(),
+        bark_key_override: Some("custom_account_bark_key".into()),
+        last_checked_at: None,
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
+    };
+    db::insert_account(&pool, &account).await.unwrap();
+
+    let target = sparklight::model::SparkTarget {
+        id: "tgt_manual_test".into(),
+        account_id: "acc_target_test".into(),
+        target_sec_uid: "sec_uid_target".into(),
+        target_uid: Some("87654321".into()),
+        conversation_id: None,
+        conversation_type: 1,
+        target_nickname: "目标昵称".into(),
+        remark_name: None,
+        target_avatar: None,
+        is_enabled: true,
+        spark_days: 10,
+        spark_desc: None,
+        is_sparked_today: None,
+        today_checked_at: None,
+        message_template: "🔥".into(),
+        last_sent_at: None,
+        last_status: None,
+        last_error: None,
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
+    };
+    db::insert_target(&pool, &target).await.unwrap();
+
+    let res = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/targets/tgt_manual_test/test")
+                .header("X-API-Key", &valid_api_key)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(res.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let accept_result = tokio::time::timeout(std::time::Duration::from_millis(150), listener.accept()).await;
+    assert!(accept_result.is_err(), "前台手动单目标续火测试失败严禁向 Bark 发送通知");
+}
+
+#[tokio::test]
 async fn test_bark_notifier_physical_silence_window() {
     use std::sync::atomic::{AtomicI64, Ordering};
     use std::sync::Arc;

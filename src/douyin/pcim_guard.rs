@@ -150,7 +150,6 @@ impl GuardKey {
             ("bd-ticket-guard-web-version", if material.data.ts_sign.starts_with("ts.1") { "1" } else { "2" }),
             ("bd-ticket-guard-web-sign-type", sign_type),
             ("bd-ticket-guard-version", "2"),
-            ("bd-ticket-guard-iteration-version", "1"),
             ("bd-ticket-guard-client-data", value.as_str()),
         ] {
             let mut header = HeaderValue::from_str(text).map_err(|_| anyhow::anyhow!("GUARD_INVALID_HEADER"))?;
@@ -245,8 +244,8 @@ mod tests {
             assert_eq!(key.public_key_base64().len(),88);
             assert_eq!(headers["bd-ticket-guard-web-version"],if prefix=="ts.1" {"1"}else{"2"});
             assert_eq!(headers["bd-ticket-guard-web-sign-type"],"0");
-            assert_eq!(headers["bd-ticket-guard-iteration-version"], "1");
-            assert_eq!(headers.len(), 6);
+            assert!(!headers.contains_key("bd-ticket-guard-iteration-version"));
+            assert_eq!(headers.len(), 5);
             assert!(headers.values().all(|v|v.is_sensitive()));
             let decoded=STANDARD.decode(headers["bd-ticket-guard-client-data"].as_bytes()).unwrap();
             let data:serde_json::Value=serde_json::from_slice(&decoded).unwrap();
