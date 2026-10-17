@@ -159,9 +159,7 @@ impl DouyinClient {
         if let Some(initial) = initial {
             initial.refresh_request(self,&mut request)?;
         } else {
-            let cookie = if self.pcim_initial.lock().unwrap().is_some() {
-                session_auth::pcim_init::strip_old_guard(&current_cookie)
-            } else if original_cookie.contains("bd_ticket_guard_client_data=") {
+            let cookie = if original_cookie.contains("bd_ticket_guard_client_data=") {
                 original_cookie.to_string()
             } else { current_cookie };
             request.headers_mut().insert(header::COOKIE, header::HeaderValue::from_str(&cookie).context("Cookie HTTP 格式无效")?);

@@ -312,7 +312,7 @@ async fn full_chain_signed_send_with_guard_signature_and_dtrait() {
         
         assert!(r.headers().contains_key("bd-ticket-guard-client-data"));
         assert_eq!(r.headers()["bd-ticket-guard-web-version"], "2");
-        assert_eq!(r.headers()["bd-ticket-guard-web-sign-type"], "1");
+        assert_eq!(r.headers()["bd-ticket-guard-web-sign-type"], "0");
         assert!(!r.headers().contains_key("bd-ticket-guard-iteration-version"), "iteration-version 仅存放在 Cookie 中，严禁作为 HTTP 请求头发送以防风控拦截");
         assert_eq!(r.headers()["bd-ticket-guard-ree-public-key"].to_str().unwrap(), key.public_key_base64().as_str());
         

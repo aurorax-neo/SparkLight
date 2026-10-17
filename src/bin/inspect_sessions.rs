@@ -105,6 +105,46 @@ async fn main() -> Result<()> {
         } else {
             println!("  WebContext: NONE");
         }
+
+        if let Ok(cookie_bytes) = secret_box.decrypt(&enc_cookie) {
+            if let Ok(cookie_str) = String::from_utf8(cookie_bytes) {
+                if let Ok(client) = sparklight::douyin::client::DouyinClient::new(&cookie_str, &alias) {
+                    let resp = reqwest::Client::new()
+                        .get("https://www.douyin.com/passport/account/info/v2/?aid=6383")
+                        .header(reqwest::header::COOKIE, &cookie_str)
+                        .header(reqwest::header::USER_AGENT, "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36")
+                        .send()
+                        .await;
+                    match resp {
+                        Ok(r) => {
+                            let status = r.status();
+                            let text = r.text().await.unwrap_or_default();
+                            println!("  Direct /passport/account/info/v2/ HTTP Status: {}, Body: {}", status, text);
+                        }
+                        Err(e) => println!("  Direct /passport/account/info/v2/ Error: {}", e),
+                    }
+                    let beat_resp = reqwest::Client::new()
+                        .get("https://www.douyin.com/passport/token/beat/web/?scene=boot&aid=6383")
+                        .header(reqwest::header::COOKIE, &cookie_str)
+                        .header(reqwest::header::USER_AGENT, "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36")
+                        .header("web-sdk-version", "1")
+                        .send()
+                        .await;
+                    match beat_resp {
+                        Ok(r) => {
+                            let status = r.status();
+                            let headers = format!("{:?}", r.headers());
+                            let text = r.text().await.unwrap_or_default();
+                            println!("  Direct /passport/token/beat/web/ Status: {}, Headers: {}, Body: {}", status, headers, text);
+                        }
+                        Err(e) => println!("  Direct /passport/token/beat/web/ Error: {}", e),
+                    }
+                    println!("  Executing live check_cookie for {}...", alias);
+                    let check_res = client.check_cookie().await;
+                    println!("  Live check_cookie result: {:?}", check_res);
+                }
+            }
+        }
     }
 
     Ok(())

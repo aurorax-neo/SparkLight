@@ -48,7 +48,7 @@ impl ConversationTicket {
         let send_url = format!("https://imapi.douyin.com/v1/message/send?verifyFp={verify_fp}&fp={verify_fp}&msToken={ms_token}");
         let mut request=client.web_request(Method::POST, &send_url)?
             .header(header::CONTENT_TYPE,"application/x-protobuf").header(header::ACCEPT,"application/x-protobuf")
-            .header("sec-ch-ua", "\"Brave\";v=\"155\", \"Chromium\";v=\"155\", \"Not(A:Brand\";v=\"24\"")
+            .header("sec-ch-ua", "\"Chromium\";v=\"133\", \"Not(A:Brand\";v=\"99\", \"Google Chrome\";v=\"133\"")
             .header("sec-ch-ua-mobile", "?0")
             .header("sec-ch-ua-platform", "\"macOS\"")
             .header("sec-fetch-dest", "empty")
@@ -66,9 +66,7 @@ impl ConversationTicket {
                     self.uid,
                     &current_cookie,
                     now,
-                    crate::douyin::pcim_guard::GuardMode::Hmac {
-                        server_spki_der: crate::douyin::pcim_guard::OFFICIAL_SERVER_SPKI_DER,
-                    },
+                    crate::douyin::pcim_guard::GuardMode::Ecdsa,
                 )?;
                 for (name, value) in headers {
                     if let Some(n) = name { request.headers_mut().insert(n, value); }
@@ -243,6 +241,7 @@ pub(crate) fn old_guard(name: &str) -> bool {
     let name = name.trim().to_ascii_lowercase();
     name.contains("ticket_guard") || name.starts_with("_bd_ticket") || name.starts_with("__security")
 }
+#[allow(dead_code)]
 pub(crate) fn strip_old_guard(cookie: &str) -> String {
     cookie.split(';').map(str::trim).filter(|part| !part.is_empty()
         && !old_guard(part.split('=').next().unwrap_or(""))).collect::<Vec<_>>().join("; ")

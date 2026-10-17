@@ -410,9 +410,27 @@ impl DouyinClient {
         Ok(())
     }
 
-    /// 官方 TokenBeat 机制：停用直接 HTTP 轮询蜜罐接口，避免无头环境中触发平台 403 封锁
-    pub async fn passport_token_beat(&self, _scene: &str) -> Result<bool> {
-        Ok(false)
+    /// 官方 TokenBeat 机制：通过 /passport/token/beat/web/ 进行会话保活并自动同步身份令牌与 Cookie
+    pub async fn passport_token_beat(&self, scene: &str) -> Result<bool> {
+        let cookie = self.get_current_cookie();
+        let url = format!("https://www.douyin.com/passport/token/beat/web/?scene={scene}&aid=6383");
+        let resp = self.client.get(&url)
+            .header(header::COOKIE, &cookie)
+            .header(header::USER_AGENT, DEFAULT_USER_AGENT)
+            .header("web-sdk-version", "1")
+            .send()
+            .await?;
+        if !resp.status().is_success() {
+            return Ok(false);
+        }
+        let headers = resp.headers().clone();
+        let body: serde_json::Value = resp.json().await.unwrap_or_default();
+        let success = body.get("data").and_then(|d| d.get("error_code")).and_then(|c| c.as_i64()) == Some(0)
+            || body.get("message").and_then(|m| m.as_str()) == Some("success");
+        if success {
+            self.merge_response_headers(&headers);
+        }
+        Ok(success)
     }
 
     /// 确保当前账号具备有效的 GuardKey 与已建联的服务端票据材料。

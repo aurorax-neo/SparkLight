@@ -1017,9 +1017,6 @@ impl SparkEngine {
             }
             // 后台定时心跳保活巡检严格保持静默，绝不向 Bark 发送失败告警；告警仅在每日计划任务执行失败时产生
             if !self.check_account_cookie(&account, false).await.unwrap_or(false) { continue; }
-            if !sync_profiles {
-                continue;
-            }
             let Ok(plain) = self.secret_box.decrypt(&account.encrypted_cookie) else {
                 continue;
             };
@@ -1030,6 +1027,21 @@ impl SparkEngine {
                 continue;
             };
             if client.load_web_context(&self.pool,&self.secret_box,&account.id,account.uid.as_deref()).await.is_err() { continue; }
+
+            // 执行官方 Token Beat 会话延寿保活
+            let beat_ok = client.passport_token_beat("polling").await.unwrap_or(false);
+            if beat_ok && client.is_cookie_changed() {
+                let refreshed_cookie = client.get_current_cookie();
+                if let Ok(new_encrypted) = self.secret_box.encrypt(refreshed_cookie.as_bytes()) {
+                    db::update_account_cookie(&self.pool, &account.id, &new_encrypted).await.ok();
+                    client.persist_web_context(&self.pool, &self.secret_box, &account.id).await.ok();
+                    tracing::info!(account = %account.alias, "TokenBeat 保活成功，已更新 Cookie 与 Web 凭据");
+                }
+            }
+
+            if !sync_profiles {
+                continue;
+            }
             self.persist_live_profiles(&client, &account).await;
             if client.risk_limited() {
                 tracing::warn!("自动资料同步遇到风控，本轮剩余账号不再请求");

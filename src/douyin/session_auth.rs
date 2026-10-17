@@ -73,6 +73,8 @@ impl ConversationTicket {
             && !self.ticket.is_empty() && self.short_id > 0
             && validate_conversation(self.uid, &self.conversation_id, self.conversation_type).is_ok()
     }
+    pub fn short_id(&self) -> u64 { self.short_id }
+    pub fn ticket(&self) -> &str { &self.ticket }
 }
 impl DouyinClient {
     pub async fn acquire_conversation_ticket(&self, expected_uid: &str, target_uid: u64) -> Result<ConversationTicket> {
