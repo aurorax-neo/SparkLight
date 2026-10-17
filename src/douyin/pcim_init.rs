@@ -27,7 +27,7 @@ impl ConversationTicket {
     pub(crate) fn build_pcim_auth_request(&self, client: &DouyinClient, auth: &GuardSendAuth, client_id: &str, text: &str) -> Result<reqwest::Request> {
         self.build_pcim_auth_request_with_ts(client, auth, client_id, text, None)
     }
-    pub(crate) fn build_pcim_auth_request_with_ts(&self, client: &DouyinClient, auth: &GuardSendAuth, client_id: &str, text: &str, ts_override: Option<i64>) -> Result<reqwest::Request> {
+   pub(crate) fn build_pcim_auth_request_with_ts(&self, client: &DouyinClient, auth: &GuardSendAuth, client_id: &str, text: &str, ts_override: Option<(i64, bool)>) -> Result<reqwest::Request> {
         anyhow::ensure!(!text.trim().is_empty() && text.len()<=4096, "PCIM_INIT_TEXT");
         anyhow::ensure!(self.is_current(client) && !client.sending_blocked(), "PCIM_INIT_CONTEXT");
         anyhow::ensure!(uuid::Uuid::parse_str(client_id).is_ok_and(|u|u.get_version_num()==4 && u.to_string()==client_id), "PCIM_INIT_UUID");
@@ -43,9 +43,18 @@ impl ConversationTicket {
         encode_field_varint(6,7,&mut send);encode_field_bytes(7,self.ticket.as_bytes(),&mut send);encode_field_bytes(8,client_id.as_bytes(),&mut send);
         let mut body=Vec::new();encode_field_bytes(100,&send,&mut body);
         let envelope=initial_envelope(&self.context.envelope,&body)?;
-        let verify_fp = client.extract_cookie_val("s_v_web_id").unwrap_or_else(|| derive_dynamic_verify_fp(client_id));
-        let ms_token = client.extract_cookie_val("msToken").unwrap_or_else(|| derive_ms_token(client_id));
-        let send_url = format!("https://imapi.douyin.com/v1/message/send?verifyFp={verify_fp}&fp={verify_fp}&msToken={ms_token}");
+       let mut send_url = "https://imapi.douyin.com/v1/message/send".to_string();
+       let mut query_params = Vec::new();
+       if let Some(fp) = client.extract_cookie_val("s_v_web_id") {
+           query_params.push(format!("verifyFp={fp}&fp={fp}"));
+       }
+       if let Some(ms) = client.extract_cookie_val("msToken") {
+           query_params.push(format!("msToken={ms}"));
+       }
+       if !query_params.is_empty() {
+           send_url.push('?');
+           send_url.push_str(&query_params.join("&"));
+       }
         let mut request=client.web_request(Method::POST, &send_url)?
             .header(header::CONTENT_TYPE,"application/x-protobuf").header(header::ACCEPT,"application/x-protobuf")
             .header("sec-ch-ua", crate::douyin::client::DEFAULT_SEC_CH_UA)
@@ -58,10 +67,10 @@ impl ConversationTicket {
             .body(envelope).build()?;
         match auth {
             GuardSendAuth::Signed { key, material } => {
-                let now = ts_override.unwrap_or_else(|| chrono::Utc::now().timestamp());
+               let (now, is_trusted) = ts_override.unwrap_or_else(|| (chrono::Utc::now().timestamp(), false));
                 material.validate_freshness(now)?;
                 key.verify_binding(material)?;
-                let headers = key.sign_send(
+               let headers = key.sign_send_with_trust(
                     material,
                     self.uid,
                     &current_cookie,
@@ -69,6 +78,7 @@ impl ConversationTicket {
                     crate::douyin::pcim_guard::GuardMode::Hmac {
                         server_spki_der: crate::douyin::pcim_guard::OFFICIAL_SERVER_SPKI_DER,
                     },
+                   is_trusted,
                 )?;
                 for (name, value) in headers {
                     if let Some(n) = name { request.headers_mut().insert(n, value); }
@@ -83,7 +93,7 @@ impl ConversationTicket {
             protocol.add_bool("bool_1", true);
             protocol.add_hash("str_1", crate::douyin::pcim_features::murmur3("douyin_web"));
             let (central, _) = protocol.result();
-            let ts = ts_override.unwrap_or_else(|| chrono::Utc::now().timestamp());
+           let (ts, _) = ts_override.unwrap_or_else(|| (chrono::Utc::now().timestamp(), false));
             if let Ok(hdr) = cipher.central_header(&central, "/v1/message/send", &[], ts) {
                 request.headers_mut().insert("x-tt-session-dtrait", hdr);
             }
@@ -166,6 +176,7 @@ fn initial_envelope(context:&[u8],body:&[u8])->Result<Vec<u8>> {
     }
     Ok(envelope)
 }
+#[allow(dead_code)]
 fn derive_ms_token(client_id: &str) -> String {
     use sha2::{Sha256, Digest};
     let mut hasher = Sha256::new();
@@ -203,6 +214,7 @@ fn safe_ack_summary(bytes: &[u8], client_id: &str, uid: u64) -> serde_json::Valu
         "check_code":number(&inner,5),"uuid_matches":unique_field(&inner,4,2).ok().map(|b|b==client_id.as_bytes()),
         "positive_message_id":number(&inner,1).map(|v|v>0)})
 }
+#[allow(dead_code)]
 pub fn derive_dynamic_verify_fp(client_id: &str) -> String {
     use sha2::{Sha256, Digest};
     let mut hasher = Sha256::new();
@@ -394,12 +406,14 @@ impl DouyinClient {
             let auth = GuardSendAuth::Signed { key, material };
             let client_id = uuid::Uuid::new_v4().to_string();
             stage = "BUILD";
-            let trusted_ts = self.get_trusted_timestamp(binding.uid).await
-                .unwrap_or_else(|e| {
+           let (trusted_ts, is_trusted) = match self.get_trusted_timestamp(binding.uid).await {
+               Ok(ts) => (ts, true),
+               Err(e) => {
                     tracing::warn!(error = %e, "拉取官方授信时间失败，回退使用本机时间戳");
-                    chrono::Utc::now().timestamp()
-                });
-            let request = ticket.build_pcim_auth_request_with_ts(self, &auth, &client_id, text, Some(trusted_ts))?;
+                   (chrono::Utc::now().timestamp(), false)
+               }
+           };
+           let request = ticket.build_pcim_auth_request_with_ts(self, &auth, &client_id, text, Some((trusted_ts, is_trusted)))?;
             let submission = InitialSubmission { ticket:&ticket,binding:&binding,auth:&auth,client_id:&client_id,day };
             let auth_kind = match &auth {
                 GuardSendAuth::Signed { key, material } => format!("Signed(pub={},mat_age={})", &key.public_key_base64()[..8], chrono::Utc::now().timestamp() - material.acquired_at()),

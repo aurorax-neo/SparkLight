@@ -590,6 +590,43 @@ impl DouyinClient {
     /// 登录身份仅由 Passport/self 确认，不以 query/other 接口猜测当前账号。
     pub async fn check_cookie(&self) -> CheckCookieResult {
         *self.verified_uid.lock().unwrap() = None;
+
+       #[cfg(test)]
+       let skip_self_probe = im_identity_tests::active();
+       #[cfg(not(test))]
+       let skip_self_probe = false;
+
+        // 1. 优先尝试安全的 Web 个人资料端点 (https://www.douyin.com/aweme/v1/web/user/profile/self/)
+        // 该端点无需 bd-ticket-guard 保护，只读且完全不会触发风控踢下线
+       if !skip_self_probe {
+           if let Ok(request) = self.web_request_allow_probe(Method::GET, "https://www.douyin.com/aweme/v1/web/user/profile/self/") {
+            if let Ok(json) = self.web_json(request).await {
+                let status_code = json.get("status_code").and_then(Value::as_i64).unwrap_or(-1);
+                if status_code == 0 {
+                    if let Some(user) = json.get("user").filter(|u| u.is_object()) {
+                        let uid = user.get("uid").or_else(|| user.get("uid_str"))
+                            .and_then(|v| v.as_str().map(str::to_string).or_else(|| v.as_u64().map(|u| u.to_string())))
+                            .unwrap_or_default();
+                        if uid.parse::<u64>().ok().filter(|u| *u > 0).is_some() {
+                            if self.web_context.lock().unwrap().as_ref().is_some_and(|c| c.uid.to_string() != uid) {
+                                self.stop_requests(web::FailureKind::Expired);
+                                return CheckCookieResult::Expired("Cookie 身份与绑定 Web 上下文不符，停止请求".into());
+                            }
+                            let sec_uid = user.get("sec_uid").and_then(Value::as_str).unwrap_or("").to_string();
+                            let nickname = user.get("nickname").and_then(Value::as_str).unwrap_or("抖音用户").to_string();
+                            let avatar_url = user.pointer("/avatar_thumb/url_list/0").and_then(Value::as_str).unwrap_or("").to_string();
+                            let profile = DouyinUserProfile { uid, sec_uid, nickname, avatar_url };
+                            return self.confirm_profile(profile);
+                        }
+                    }
+                } else if status_code == 8 {
+                    self.stop_requests(web::FailureKind::Expired);
+                    return CheckCookieResult::Expired("抖音 Web 端返回用户未登录 (status_code 8)".into());
+                }
+            }
+        }
+       }
+
         let request = match self.web_request_allow_probe(Method::GET, "https://www.douyin.com/passport/account/info/v2/?aid=6383") {
             Ok(r) => r, Err(e) => return Self::check_failure(e),
         };

@@ -115,10 +115,16 @@ impl GuardKey {
     }
     /// 固定发送路径，时间由调用方的已验证时钟提供；不复用缓存签名。
     pub fn sign_send(&self, material: &BoundGuardMaterial, uid: u64, cookie: &str, timestamp: i64, mode: GuardMode<'_>) -> Result<HeaderMap> {
-        self.sign_path(material, "/v1/message/send", uid, cookie, timestamp, mode)
+       self.sign_send_with_trust(material, uid, cookie, timestamp, mode, false)
+   }
+   pub fn sign_send_with_trust(&self, material: &BoundGuardMaterial, uid: u64, cookie: &str, timestamp: i64, mode: GuardMode<'_>, is_trusted: bool) -> Result<HeaderMap> {
+       self.sign_path_with_trust(material, "/v1/message/send", uid, cookie, timestamp, mode, is_trusted)
     }
     /// 通用路径签名：用于 /v1/message/send 以及 /passport/token/beat/web/ 等需要 Guard 签名的路径。
     pub fn sign_path(&self, material: &BoundGuardMaterial, path: &str, uid: u64, cookie: &str, timestamp: i64, mode: GuardMode<'_>) -> Result<HeaderMap> {
+       self.sign_path_with_trust(material, path, uid, cookie, timestamp, mode, false)
+   }
+   pub fn sign_path_with_trust(&self, material: &BoundGuardMaterial, path: &str, uid: u64, cookie: &str, timestamp: i64, mode: GuardMode<'_>, is_trusted: bool) -> Result<HeaderMap> {
         ensure!(uid == material.uid && material.session_hash == strict_session_hash(cookie)?, "GUARD_SESSION_CHANGED");
         ensure!(material.public == self.public_key_base64(), "GUARD_KEY_BINDING_MISMATCH");
         // 本地保守门限，不声明这是平台票据的真实 TTL。
@@ -141,7 +147,7 @@ impl GuardKey {
                 (STANDARD.encode(mac.finalize().into_bytes()), "1")
             }
         };
-        let t_trust = None;
+       let t_trust = if is_trusted { Some(1) } else { None };
         let payload = ClientData { ts_sign: &material.data.ts_sign, req_content: "ticket,path,timestamp", req_sign: &signature, timestamp, t_trust };
         let value = STANDARD.encode(serde_json::to_vec(&payload).context("GUARD_ENCODE_FAILED")?);
         let mut headers = HeaderMap::new();
