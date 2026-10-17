@@ -35,10 +35,7 @@ impl ConversationTicket {
         #[derive(serde::Serialize)]
         struct Content<'a> { #[serde(rename="aweType")] awe_type:u16, #[serde(rename="type")] kind:u8, #[serde(rename="richTextInfos")] rich_text_infos:Vec<()>, text:&'a str }
         encode_field_bytes(4,&serde_json::to_vec(&Content{awe_type:700,kind:0,rich_text_infos:vec![],text})?,&mut send);
-        let seed = client_id.bytes().fold(0u64, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u64));
-        let base_sec: i64 = 1792137000 + ((seed >> 24) % 86400) as i64;
-        let millis = base_sec * 1000 + (seed % 1000) as i64;
-        let stime = format!("{millis}.{:04}", (seed >> 16) % 10000);
+        let stime = get_or_create_stime(client_id);
         for (k,v) in [("s:mentioned_users",""),("s:client_message_id",client_id),("s:stime",&stime)] { let mut item=Vec::new();encode_field_bytes(1,k.as_bytes(),&mut item);encode_field_bytes(2,v.as_bytes(),&mut item);encode_field_bytes(5,&item,&mut send); }
         encode_field_varint(6,7,&mut send);encode_field_bytes(7,self.ticket.as_bytes(),&mut send);encode_field_bytes(8,client_id.as_bytes(),&mut send);
         let mut body=Vec::new();encode_field_bytes(100,&send,&mut body);
@@ -90,6 +87,26 @@ impl ConversationTicket {
         Ok(request)
     }
 }
+fn get_or_create_stime(client_id: &str) -> String {
+    use std::sync::Mutex;
+    use std::collections::HashMap;
+    static CACHE: Mutex<Option<HashMap<String, (i64, String)>>> = Mutex::new(None);
+    let mut lock = CACHE.lock().unwrap();
+    let map = lock.get_or_insert_with(HashMap::new);
+    let now = chrono::Utc::now().timestamp();
+    if map.len() > 100 {
+        map.retain(|_, (ts, _)| now.saturating_sub(*ts) < 300);
+    }
+    if let Some((_, stime)) = map.get(client_id) {
+        return stime.clone();
+    }
+    let seed = client_id.bytes().fold(0u64, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u64));
+    let now_millis = chrono::Utc::now().timestamp_millis();
+    let stime = format!("{now_millis}.{:04}", (seed >> 16) % 10000);
+    map.insert(client_id.to_string(), (now, stime.clone()));
+    stime
+}
+
 fn initial_envelope(context:&[u8],body:&[u8])->Result<Vec<u8>> {
     let mut envelope=Vec::new();
     encode_field_varint(1,100,&mut envelope);encode_field_varint(2,10015,&mut envelope);
@@ -108,11 +125,13 @@ fn initial_envelope(context:&[u8],body:&[u8])->Result<Vec<u8>> {
         let value=unique_field(&f,2,2)?;
         identity_fields.insert(name.to_owned(), value.to_vec());
     }
-    anyhow::ensure!(found.contains("session_aid") && found.contains("user_agent"),"PCIM_INIT_MISSING_IDENTITY");
+    anyhow::ensure!(found.len() == 5, "PCIM_INIT_MISSING_IDENTITY");
     let empty = Vec::new();
     let token_val = identity_fields.get("identity_security_token").unwrap_or(&empty);
     let device_val = identity_fields.get("identity_security_device_id").unwrap_or(&empty);
     let ua_val = identity_fields.get("user_agent").unwrap_or(&empty);
+    anyhow::ensure!(!token_val.is_empty() && !device_val.is_empty(), "PCIM_INIT_EMPTY_IDENTITY");
+    anyhow::ensure!(token_val != b"pcim_identity_token_web" && device_val != b"pcim_device_id_web", "PCIM_INIT_DUMMY_IDENTITY_REJECTED");
     let full_ext: Vec<(&str, &[u8])> = vec![
         ("identity_security_token", token_val),
         ("identity_security_device_id", device_val),

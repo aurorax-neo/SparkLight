@@ -249,7 +249,7 @@ impl SparkEngine {
         }
         let now = Utc::now().timestamp();
         let diff = now - last;
-        (0..=1800).contains(&diff)
+        (-60..=1800).contains(&diff)
     }
 
     pub fn delay_range(&self) -> (u64,u64) { *self.delay_settings.borrow() }
