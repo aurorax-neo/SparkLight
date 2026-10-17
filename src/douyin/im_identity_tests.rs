@@ -36,7 +36,7 @@ fn client(case:&str) -> DouyinClient {
     *c.verified_uid.lock().unwrap()=Some(UID);
     let mut context=super::super::im_auth::WebSessionContext::from_session(UID,&c.get_current_cookie(),DEFAULT_USER_AGENT).unwrap()
         .with_identity(&serde_json::json!({"message":"success","data":{"identity_security_token":"public-expired","device_id":"public-device"}})).unwrap();
-    context.identity_acquired_at=Some(chrono::Utc::now().timestamp()-601);
+    context.identity_acquired_at=Some(chrono::Utc::now().timestamp()-super::super::im_auth::MAX_AGE_SECS-1);
     c.set_web_context(context).unwrap();
     // 合成的完整历史结论，仅用于离线发送门禁测试。
     c.send_history.lock().unwrap().insert(CID.into(),(UID,1,chrono::Utc::now().with_timezone(&chrono::FixedOffset::east_opt(8*3600).unwrap()).date_naive(),false));
@@ -96,7 +96,7 @@ async fn new_identity_does_not_create_or_rebind_send_authorization() {
 #[test]
 fn legacy_unknown_expired_future_and_cookie_changed_identity_are_not_current() {
     let c=client("age");let mut context=c.web_context.lock().unwrap().clone().unwrap();let now=chrono::Utc::now().timestamp();
-    for time in [None,Some(now-601),Some(now+1)] {context.identity_acquired_at=time;assert!(!context.identity_is_current(UID,&c.get_current_cookie(),now));}
+    for time in [None,Some(now-super::super::im_auth::MAX_AGE_SECS-1),Some(now+1)] {context.identity_acquired_at=time;assert!(!context.identity_is_current(UID,&c.get_current_cookie(),now));}
     context.identity_acquired_at=Some(now);assert!(context.identity_is_current(UID,&c.get_current_cookie(),now));
     assert!(!context.identity_is_current(777,&c.get_current_cookie(),now));assert!(!context.identity_is_current(UID,"sessionid=changed",now));
     let mut value=serde_json::to_value(&context).unwrap();value.as_object_mut().unwrap().remove("identity_acquired_at");

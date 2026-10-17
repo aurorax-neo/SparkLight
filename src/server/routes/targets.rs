@@ -65,6 +65,7 @@ pub async fn create_target(
     State(state): State<AppState>,
     Json(req): Json<CreateTargetReq>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
+    state.engine.record_manual_action();
     let account = db::get_account(&state.pool, &req.account_id).await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"code": 500, "message": e.to_string()}))))?
         .ok_or_else(|| (StatusCode::BAD_REQUEST, Json(json!({"code": 400, "message": "所属账号不存在"}))))?;
@@ -152,6 +153,7 @@ pub async fn batch_create_targets(
     State(state): State<AppState>,
     Json(req): Json<BatchCreateTargetsReq>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
+    state.engine.record_manual_action();
     let account = db::get_account(&state.pool, &req.account_id).await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"code": 500, "message": e.to_string()}))))?
         .ok_or_else(|| (StatusCode::BAD_REQUEST, Json(json!({"code": 400, "message": "所属账号不存在"}))))?;
@@ -273,6 +275,7 @@ pub async fn update_target(
     Path(id): Path<String>,
     Json(req): Json<UpdateTargetReq>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
+    state.engine.record_manual_action();
     let req = UpdateTargetReq { is_sparked_today: None, ..req };
     db::update_target(&state.pool, &id, &req).await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"code": 500, "message": e.to_string()}))))?;
@@ -287,6 +290,7 @@ pub async fn delete_target(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
+    state.engine.record_manual_action();
     db::delete_target(&state.pool, &id).await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"code": 500, "message": e.to_string()}))))?;
 

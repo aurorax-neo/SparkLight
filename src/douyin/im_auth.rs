@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use super::client::{encode_field_bytes, encode_field_varint, parse_protobuf_fields, read_varint};
 
-const MAX_AGE_SECS: i64 = 10 * 60;
+pub const MAX_AGE_SECS: i64 = 30 * 86400;
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct ImSendCredential {
@@ -509,8 +509,8 @@ mod tests {
         let mut ctx = WebSessionContext::from_credential(&c);
         let now = ctx.captured_at;
         let uid = c.uid.to_string();
-        assert_eq!(ctx.history_status(Some(&uid), cookie, now), ("AVAILABLE", Some(now + 600)));
-        assert_eq!(ctx.history_status(Some(&uid), cookie, now + 601).0, "EXPIRED");
+        assert_eq!(ctx.history_status(Some(&uid), cookie, now), ("AVAILABLE", Some(now + MAX_AGE_SECS)));
+        assert_eq!(ctx.history_status(Some(&uid), cookie, now + MAX_AGE_SECS + 1).0, "EXPIRED");
         assert_eq!(ctx.history_status(Some(&uid), cookie, now - 1).0, "EXPIRED");
         assert_eq!(ctx.history_status(Some("1"), cookie, now).0, "INVALID");
         assert_eq!(ctx.history_status(None, cookie, now).0, "INVALID");

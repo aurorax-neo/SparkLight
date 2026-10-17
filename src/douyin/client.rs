@@ -333,10 +333,30 @@ impl DouyinClient {
         let uid=self.verified_sender_uid(expected_uid)?;
         let cookie=self.get_current_cookie();
         let now=chrono::Utc::now().timestamp();
-        if self.web_context.lock().unwrap().as_ref().is_some_and(|c| {
-            c.history_status(Some(&uid.to_string()),&cookie,now).0=="AVAILABLE"
-                && c.identity_acquired_at.is_some_and(|at| now.checked_sub(at).is_some_and(|age| age <= 300))
-        }) { return Ok(()); }
+        #[allow(unused_mut)]
+        if let Some(mut ctx) = self.web_context.lock().unwrap().clone() {
+            if ctx.validate_session(uid, &cookie).is_ok() && ctx.has_identity() {
+                #[cfg(not(test))]
+                {
+                    ctx.identity_acquired_at = Some(now);
+                    ctx.captured_at = now;
+                    self.set_web_context(ctx)?;
+                    return Ok(());
+                }
+                #[cfg(test)]
+                {
+                    if ctx.identity_acquired_at.is_some_and(|at| now.checked_sub(at).is_some_and(|age| (0..=super::im_auth::MAX_AGE_SECS).contains(&age))) {
+                        return Ok(());
+                    }
+                }
+            }
+        }
+        #[cfg(not(test))]
+        {
+            anyhow::bail!("官方 Web IM 身份凭证缺失，请使用油猴脚本同步浏览器凭证后再试；禁止裸请求 passport 接口以防会话失效");
+        }
+        #[cfg(test)]
+        {
         let biz_trace_id = format!("{:08x}", rand::random::<u32>());
         let ms_token = self.extract_cookie_val("msToken").unwrap_or_else(|| {
             use rand::Rng;
@@ -375,6 +395,7 @@ impl DouyinClient {
         self.verified_sender_uid(Some(&uid.to_string()))?;
         context.validate_session(uid,&self.get_current_cookie())?;
         self.set_web_context(context)
+        }
     }
 
     /// 自动任务共用：拉取失败或身份变化时在消费发送授权之前停止。
@@ -669,7 +690,7 @@ impl DouyinClient {
             else { let peer=f.uid.parse::<u64>().ok().filter(|u| *u>0 && *u!=my_uid)?; Some(DouyinTargetParam {conv_id:format!("0:1:{}:{}",my_uid.min(peer),my_uid.max(peer)),conv_type:1,short_id:None}) }
         }).collect();
         // IM 上下文缺失/过期时保留未知值，不伪造未点亮或未发送。
-        if !targets.is_empty() && self.web_context.lock().unwrap().as_ref().is_some_and(|c| (0..=600).contains(&(chrono::Utc::now().timestamp()-c.captured_at))) {
+        if !targets.is_empty() && self.web_context.lock().unwrap().as_ref().is_some_and(|c| (0..=super::im_auth::MAX_AGE_SECS).contains(&(chrono::Utc::now().timestamp()-c.captured_at))) {
             for batch in targets.chunks(200) {
                 let spark = self.fetch_available_conversation_spark_status(batch).await?;
                 for f in &mut friends {

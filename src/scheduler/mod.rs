@@ -1209,7 +1209,7 @@ mod diagnostic_tests {
             let client = DouyinClient::new(COOKIE, &account.alias).unwrap();
             let result = if expired {
                 let mut context = WebSessionContext::from_credential(&test_credential(COOKIE, CONVERSATION, 1));
-                context.captured_at -= 601;
+                context.captured_at -= crate::douyin::im_auth::MAX_AGE_SECS + 1;
                 let encrypted = engine.secret_box.encrypt(&serde_json::to_vec(&context).unwrap()).unwrap();
                 sqlx::query("INSERT INTO account_web_contexts VALUES(?,?)").bind(&account.id).bind(encrypted).execute(&engine.pool).await.unwrap();
                 // 装载本身不校验 IM 时效，直到后续 IM 请求才拒绝；无需网络。
