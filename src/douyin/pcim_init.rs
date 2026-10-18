@@ -75,7 +75,9 @@ impl ConversationTicket {
                     self.uid,
                     &current_cookie,
                     now,
-                    crate::douyin::pcim_guard::GuardMode::Ecdsa,
+                    crate::douyin::pcim_guard::GuardMode::Hmac {
+                        server_spki_der: crate::douyin::pcim_guard::OFFICIAL_SERVER_SPKI_DER,
+                    },
                    is_trusted,
                 )?;
                 for (name, value) in headers {
