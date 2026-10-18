@@ -75,13 +75,16 @@ impl ConversationTicket {
                     self.uid,
                     &current_cookie,
                     now,
-                    crate::douyin::pcim_guard::GuardMode::Ecdsa,
+                    crate::douyin::pcim_guard::GuardMode::Hmac {
+                        server_spki_der: crate::douyin::pcim_guard::OFFICIAL_SERVER_SPKI_DER,
+                    },
                    is_trusted,
                 )?;
                 for (name, value) in headers {
                     if let Some(n) = name { request.headers_mut().insert(n, value); }
                 }
-                let mut val = header::HeaderValue::from_str(&current_cookie)?;
+                let aligned_cookie = crate::douyin::pcim_guard::align_guard_cookie(&current_cookie, &material.public);
+                let mut val = header::HeaderValue::from_str(&aligned_cookie)?;
                 val.set_sensitive(true);
                 request.headers_mut().insert(header::COOKIE, val);
             }
@@ -345,13 +348,14 @@ pub(crate) struct InitialSubmission<'a> {
     auth: &'a GuardSendAuth,
     client_id: &'a str,
     day: chrono::NaiveDate,
+    ts_override: Option<(i64, bool)>,
 }
 impl InitialSubmission<'_> {
     pub(crate) fn refresh_request(&self, client: &DouyinClient, request: &mut reqwest::Request) -> Result<()> {
         anyhow::ensure!(self.ticket.is_current(client) && !client.sending_blocked(), "PCIM_INIT_QUEUE_CONTEXT");
         anyhow::ensure!(self.ticket.uid==self.binding.uid && self.ticket.conversation_id==self.binding.cid && self.ticket.conversation_type==self.binding.kind,"PCIM_INIT_TICKET_BINDING");
-        // 排队后用同一新钥重建声明，绝不回填原 Cookie 中的旧证书/签名。
-        let expected = self.ticket.build_pcim_auth_request(client,self.auth,self.client_id,&self.binding.template)?;
+        // 排队后用同一新钥重建声明，绝不回填原 Cookie 中的旧证书/签名，保持授信时间戳与信任标识。
+        let expected = self.ticket.build_pcim_auth_request_with_ts(client,self.auth,self.client_id,&self.binding.template,self.ts_override)?;
         anyhow::ensure!(request.url() == expected.url() && request.method() == expected.method()
             && request.body().and_then(|b| b.as_bytes()) == expected.body().and_then(|b| b.as_bytes()), "PCIM_INIT_REQUEST_CHANGED");
         *request = expected;
@@ -412,7 +416,7 @@ impl DouyinClient {
                }
            };
            let request = ticket.build_pcim_auth_request_with_ts(self, &auth, &client_id, text, Some((trusted_ts, is_trusted)))?;
-            let submission = InitialSubmission { ticket:&ticket,binding:&binding,auth:&auth,client_id:&client_id,day };
+            let submission = InitialSubmission { ticket:&ticket,binding:&binding,auth:&auth,client_id:&client_id,day,ts_override:Some((trusted_ts, is_trusted)) };
             let auth_kind = match &auth {
                 GuardSendAuth::Signed { key, material } => format!("Signed(pub={},mat_age={})", &key.public_key_base64()[..8], chrono::Utc::now().timestamp() - material.acquired_at()),
             };
@@ -566,7 +570,7 @@ mod queued_gate_tests {
             let id=uuid::Uuid::new_v4().to_string();
             let request=ticket.build_pcim_signed_request(&client,&key,&material,&id,"🔥").unwrap();
             let auth=GuardSendAuth::Signed { key, material };
-            let submission=InitialSubmission {ticket:&ticket,binding:&binding,auth:&auth,client_id:&id,day:beijing_day()};
+            let submission=InitialSubmission {ticket:&ticket,binding:&binding,auth:&auth,client_id:&id,day:beijing_day(),ts_override:None};
             let guard=client.test_lock_web_session().await;
             let send=client.execute_web_initial(request,&submission);tokio::pin!(send);
             tokio::select! { biased; _=&mut send=>panic!("request bypassed session queue"), _=tokio::time::sleep(Duration::from_millis(5))=>{} }

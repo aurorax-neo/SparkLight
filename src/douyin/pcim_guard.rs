@@ -375,6 +375,48 @@ fn strict_session_hash(cookie: &str) -> Result<String> {
     Ok(hex::encode(Sha256::digest(encoded)))
 }
 
+/// 将 Cookie 按照抖音官方 Web Guard 规范进行对齐：
+/// 1. 移除 `bd_ticket_guard_server_data` 与 `bd_ticket_guard_web_domain`（官方客户端获取 ticket 后会持久化到本地存储并从 Cookie 中移除，若发包残留会被 WAF 判定为非原生环境）；
+/// 2. 移除旧的 `bd_ticket_guard_client_data`，动态生成与当前公钥严格一致的官方规范 Cookie 元数据：
+///    `{"bd-ticket-guard-version":2,"bd-ticket-guard-iteration-version":1,"bd-ticket-guard-ree-public-key":"<PUBLIC_KEY>","bd-ticket-guard-web-version":2}`；
+/// 3. 补齐 `bd_ticket_guard_client_web_domain=2`、`_bd_ticket_crypt_doamin=2`、`__security_server_data_status=1`；
+/// 4. 确保发出的 HTTP Header `bd-ticket-guard-ree-public-key` 与 Cookie 中的公钥元数据 100% 吻合，消除分叉导致的平台强制踢下线。
+pub fn align_guard_cookie(old_cookie: &str, public_key_base64: &str) -> String {
+    let mut map: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
+    for item in old_cookie.split(';') {
+        let item = item.trim();
+        if let Some((k, v)) = item.split_once('=') {
+            let key = k.trim().to_string();
+            let val = v.trim().to_string();
+            if !key.is_empty() {
+                map.insert(key, val);
+            }
+        }
+    }
+
+    // 移除诱发风控注销的非原生残留字段
+    map.remove("bd_ticket_guard_server_data");
+    map.remove("bd_ticket_guard_web_domain");
+
+    // 注入与当前公钥对齐的官方 ClientData 元数据
+    let client_data_json = serde_json::json!({
+        "bd-ticket-guard-version": 2,
+        "bd-ticket-guard-iteration-version": 1,
+        "bd-ticket-guard-ree-public-key": public_key_base64,
+        "bd-ticket-guard-web-version": 2,
+    });
+    let client_data_b64 = STANDARD.encode(client_data_json.to_string());
+    // 官方 Web SDK 在 Cookie 中使用 encodeURIComponent 存储，对末尾 padding '=' 进行转义
+    let client_data_cookie = client_data_b64.replace('=', "%3D");
+
+    map.insert("bd_ticket_guard_client_data".into(), client_data_cookie);
+    map.insert("bd_ticket_guard_client_web_domain".into(), "2".into());
+    map.insert("_bd_ticket_crypt_doamin".into(), "2".into());
+    map.insert("__security_server_data_status".into(), "1".into());
+
+    map.into_iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join("; ")
+}
+
 #[cfg(test)]
 mod session_boundary_tests {
     use super::*;
@@ -389,5 +431,35 @@ mod session_boundary_tests {
         let material=key.bind_response(&data,1,"sessionid=A; sid_tt=X",1).unwrap();
         assert!(key.sign_send(&material,1,"sessionid=A; sid_tt=Y",2,GuardMode::Ecdsa).is_err());
         assert!(key.sign_send(&material,1,"sessionid=B; sessionid=A; sid_tt=X",2,GuardMode::Ecdsa).is_err());
+    }
+
+    #[test]
+    fn test_align_guard_cookie_cleans_server_data_and_injects_matching_client_data() {
+        let key = GuardKey::generate();
+        let pub_b64 = key.public_key_base64();
+        let raw = "sessionid=test_sid; bd_ticket_guard_server_data=old_sd; bd_ticket_guard_web_domain=old_wd; bd_ticket_guard_client_data=old_cd; other=val";
+        let aligned = align_guard_cookie(raw, &pub_b64);
+        
+        assert!(!aligned.contains("bd_ticket_guard_server_data"));
+        assert!(!aligned.contains("bd_ticket_guard_web_domain="));
+        assert!(aligned.contains("bd_ticket_guard_client_web_domain=2"));
+        assert!(aligned.contains("_bd_ticket_crypt_doamin=2"));
+        assert!(aligned.contains("__security_server_data_status=1"));
+        assert!(aligned.contains("other=val"));
+        assert!(aligned.contains("sessionid=test_sid"));
+        
+        let dict: std::collections::HashMap<_, _> = aligned.split("; ")
+            .filter_map(|s| s.split_once('='))
+            .collect();
+        let cd_raw = dict["bd_ticket_guard_client_data"].replace("%3D", "=");
+        let dec_bytes = STANDARD.decode(cd_raw).unwrap();
+        let cd_json: serde_json::Value = serde_json::from_slice(&dec_bytes).unwrap();
+        assert_eq!(cd_json["bd-ticket-guard-ree-public-key"], pub_b64.as_str());
+        assert_eq!(cd_json["bd-ticket-guard-version"], 2);
+        assert_eq!(cd_json["bd-ticket-guard-iteration-version"], 1);
+        assert_eq!(cd_json["bd-ticket-guard-web-version"], 2);
+        
+        // 验证 session_hash 在对齐前后完全一致
+        assert_eq!(strict_session_hash(raw).unwrap(), strict_session_hash(&aligned).unwrap());
     }
 }

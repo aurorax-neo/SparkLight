@@ -116,6 +116,11 @@ async fn initial_success_requires_exact_ack_identity_uuid_history_and_preserves_
     REQUESTS.with(|s|{
         let requests=s.borrow();let r=requests.iter().find(|r|r.url().path()==SEND).unwrap();
         let cookie=r.headers()[header::COOKIE].to_str().unwrap();assert!(cookie.contains("ttwid=keep"));
+        assert!(!cookie.contains("bd_ticket_guard_server_data"));
+        assert!(cookie.contains("bd_ticket_guard_client_web_domain=2"));
+        assert!(cookie.contains("_bd_ticket_crypt_doamin=2"));
+        assert!(cookie.contains("__security_server_data_status=1"));
+        assert!(cookie.contains("bd_ticket_guard_client_data="));
         assert!(r.headers().contains_key("bd-ticket-guard-client-data"));
         assert!(r.headers().contains_key("bd-ticket-guard-ree-public-key"));
         let send=bytes_field(&bytes_field(r.body().unwrap().as_bytes().unwrap(),8),100);
@@ -312,7 +317,7 @@ async fn full_chain_signed_send_with_guard_signature_and_dtrait() {
         
         assert!(r.headers().contains_key("bd-ticket-guard-client-data"));
         assert_eq!(r.headers()["bd-ticket-guard-web-version"], "2");
-        assert_eq!(r.headers()["bd-ticket-guard-web-sign-type"], "0");
+        assert_eq!(r.headers()["bd-ticket-guard-web-sign-type"], "1");
         assert!(!r.headers().contains_key("bd-ticket-guard-iteration-version"), "iteration-version 仅存放在 Cookie 中，严禁作为 HTTP 请求头发送以防风控拦截");
         assert_eq!(r.headers()["bd-ticket-guard-ree-public-key"].to_str().unwrap(), key.public_key_base64().as_str());
         
