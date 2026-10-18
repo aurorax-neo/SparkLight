@@ -129,7 +129,7 @@ fn initial_envelope(context:&[u8],body:&[u8])->Result<Vec<u8>> {
     let full_ext: Vec<(&str, &[u8])> = vec![
         ("identity_security_token", token_val),
         ("identity_security_device_id", device_val),
-        ("identity_security_aid", b""),
+        ("identity_security_aid", b"6383"),
         ("session_aid", b"6383"),
         ("session_did", b"0"),
         ("app_name", b"douyin_pc"),
@@ -229,7 +229,7 @@ mod tests {
      assert_eq!(safe_ack_summary(&ack(),"other",777)["uuid_matches"],false);
      for end in 0..a.len() {assert!(safe_ack_summary(&a[..end],ID,99191692311).to_string().len()<256);}
  }
- #[test]fn envelope_uses_observed_branch_not_old_read_version(){let mut c=Vec::new();for(k,v)in[("identity_security_token","{\"token\":\"fixture\"}"),("identity_security_device_id","fixture-device"),("identity_security_aid","6383"),("session_aid","6383"),("user_agent","fixture-UA")]{let mut h=Vec::new();encode_field_bytes(1,k.as_bytes(),&mut h);encode_field_bytes(2,v.as_bytes(),&mut h);encode_field_bytes(15,&h,&mut c)}let e=initial_envelope(&c,b"fixture").unwrap();let f=parse_protobuf_fields(&e);assert_eq!(unique_field(&f,3,2).unwrap(),b"0.1.8");assert_eq!(read_varint(unique_field(&f,6,0).unwrap(),0).unwrap().0,0);let h=f.iter().filter(|(n,_,_)|*n==15).map(|(_,_,b)|parse_protobuf_fields(b)).find(|h|unique_field(h,1,2).unwrap()==b"identity_security_aid").unwrap();assert_eq!(unique_field(&h,2,2).unwrap(),b"");assert!(initial_envelope(b"",b"x").is_err());let duplicate=[c.clone(),c].concat();assert!(initial_envelope(&duplicate,b"x").is_err())}
+ #[test]fn envelope_uses_observed_branch_not_old_read_version(){let mut c=Vec::new();for(k,v)in[("identity_security_token","{\"token\":\"fixture\"}"),("identity_security_device_id","fixture-device"),("identity_security_aid","6383"),("session_aid","6383"),("user_agent","fixture-UA")]{let mut h=Vec::new();encode_field_bytes(1,k.as_bytes(),&mut h);encode_field_bytes(2,v.as_bytes(),&mut h);encode_field_bytes(15,&h,&mut c)}let e=initial_envelope(&c,b"fixture").unwrap();let f=parse_protobuf_fields(&e);assert_eq!(unique_field(&f,3,2).unwrap(),b"0.1.8");assert_eq!(read_varint(unique_field(&f,6,0).unwrap(),0).unwrap().0,0);let h=f.iter().filter(|(n,_,_)|*n==15).map(|(_,_,b)|parse_protobuf_fields(b)).find(|h|unique_field(h,1,2).unwrap()==b"identity_security_aid").unwrap();assert_eq!(unique_field(&h,2,2).unwrap(),b"6383");assert!(initial_envelope(b"",b"x").is_err());let duplicate=[c.clone(),c].concat();assert!(initial_envelope(&duplicate,b"x").is_err())}
 #[test]fn envelope_matches_official_capture_baseline(){let mut c=Vec::new();for(k,v)in[("identity_security_token","{\"token\":\"fixture\"}"),("identity_security_device_id","fixture-device"),("identity_security_aid","6383"),("session_aid","6383"),("user_agent","fixture-UA")]{let mut h=Vec::new();encode_field_bytes(1,k.as_bytes(),&mut h);encode_field_bytes(2,v.as_bytes(),&mut h);encode_field_bytes(15,&h,&mut c)}let e=initial_envelope(&c,b"fixture").unwrap();let f=parse_protobuf_fields(&e);assert_eq!(unique_field(&f,1,0).unwrap()[0],100);assert_eq!(unique_field(&f,9,2).unwrap(),b"0");assert_eq!(unique_field(&f,11,2).unwrap(),b"douyin_pc");assert_eq!(unique_field(&f,14,2).unwrap(),b"360000");assert_eq!(unique_field(&f,21,2).unwrap(),b"douyin_web");assert_eq!(unique_field(&f,22,2).unwrap(),b"web_sdk");}
 }
 
