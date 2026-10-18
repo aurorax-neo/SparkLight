@@ -314,6 +314,7 @@ async fn full_chain_signed_send_with_guard_signature_and_dtrait() {
     REQUESTS.with(|s| {
         let requests = s.borrow();
         let r = requests.iter().find(|r| r.url().path() == SEND).unwrap();
+        assert!(r.url().query().is_none(), "发信 URL 必须为纯净路径，严禁拼接 verifyFp/msToken query 参数以防会话被注销");
         
         assert!(r.headers().contains_key("bd-ticket-guard-client-data"));
         assert_eq!(r.headers()["bd-ticket-guard-web-version"], "2");
@@ -328,9 +329,7 @@ async fn full_chain_signed_send_with_guard_signature_and_dtrait() {
         assert_eq!(client_data["req_content"], "ticket,path,timestamp");
         assert!(client_data.get("t_trust").is_none());
         
-        assert!(r.headers().contains_key("x-tt-session-dtrait"));
-        let dtrait_hdr = r.headers()["x-tt-session-dtrait"].to_str().unwrap();
-        assert!(dtrait_hdr.starts_with("test-dtrait-v1_"));
+        assert!(!r.headers().contains_key("x-tt-session-dtrait"), "发信接口严禁携带伪造 dtrait 报头以防会话被注销");
     });
     
     let state: String = sqlx::query_scalar("SELECT state FROM im_send_attempts").fetch_one(&pool).await.unwrap();

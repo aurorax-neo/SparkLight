@@ -43,19 +43,8 @@ impl ConversationTicket {
         encode_field_varint(6,7,&mut send);encode_field_bytes(7,self.ticket.as_bytes(),&mut send);encode_field_bytes(8,client_id.as_bytes(),&mut send);
         let mut body=Vec::new();encode_field_bytes(100,&send,&mut body);
         let envelope=initial_envelope(&self.context.envelope,&body)?;
-       let mut send_url = "https://imapi.douyin.com/v1/message/send".to_string();
-       let mut query_params = Vec::new();
-       if let Some(fp) = client.extract_cookie_val("s_v_web_id") {
-           query_params.push(format!("verifyFp={fp}&fp={fp}"));
-       }
-       if let Some(ms) = client.extract_cookie_val("msToken") {
-           query_params.push(format!("msToken={ms}"));
-       }
-       if !query_params.is_empty() {
-           send_url.push('?');
-           send_url.push_str(&query_params.join("&"));
-       }
-        let mut request=client.web_request(Method::POST, &send_url)?
+        let send_url = "https://imapi.douyin.com/v1/message/send";
+        let mut request=client.web_request(Method::POST, send_url)?
             .header(header::CONTENT_TYPE,"application/x-protobuf").header(header::ACCEPT,"application/x-protobuf")
             .header("sec-ch-ua", crate::douyin::client::DEFAULT_SEC_CH_UA)
             .header("sec-ch-ua-mobile", crate::douyin::client::DEFAULT_SEC_CH_UA_MOBILE)
@@ -87,16 +76,6 @@ impl ConversationTicket {
                 let mut val = header::HeaderValue::from_str(&aligned_cookie)?;
                 val.set_sensitive(true);
                 request.headers_mut().insert(header::COOKIE, val);
-            }
-        }
-        if let Ok(Some(cipher)) = client.web_context.lock().unwrap().as_ref().map_or(Ok(None), |c| c.get_dtrait_cipher()) {
-            let mut protocol = crate::douyin::pcim_features::FeatureProtocol::new();
-            protocol.add_bool("bool_1", true);
-            protocol.add_hash("str_1", crate::douyin::pcim_features::murmur3("douyin_web"));
-            let (central, _) = protocol.result();
-           let (ts, _) = ts_override.unwrap_or_else(|| (chrono::Utc::now().timestamp(), false));
-            if let Ok(hdr) = cipher.central_header(&central, "/v1/message/send", &[], ts) {
-                request.headers_mut().insert("x-tt-session-dtrait", hdr);
             }
         }
         Ok(request)
