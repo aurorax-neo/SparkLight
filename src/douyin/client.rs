@@ -1183,7 +1183,7 @@ pub(crate) fn is_fatal_send_error(code: i64, message: &str) -> bool {
             .iter().any(|word| msg.contains(word))
 }
 
-fn extract_server_data_from_headers(headers: &reqwest::header::HeaderMap) -> Option<String> {
+pub(crate) fn extract_server_data_from_headers(headers: &reqwest::header::HeaderMap) -> Option<String> {
     if let Some(val) = headers.get("bd-ticket-guard-server-data") {
         if let Ok(s) = val.to_str() {
             if !s.trim().is_empty() {

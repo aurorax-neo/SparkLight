@@ -218,6 +218,27 @@ impl DouyinClient {
         let mut cookie = self.current_cookie.lock().unwrap();
         let (updated, changed) = merge_cookies(&cookie, &set);
         if changed { *cookie = updated; *self.cookie_changed.lock().unwrap() = true; }
+
+        // 自动提取服务端下发的最新 bd-ticket-guard-server-data，实现票据自愈与滑动续期
+        if let Some(server_data_b64) = super::extract_server_data_from_headers(headers) {
+            use base64::Engine;
+            let raw_bytes = base64::engine::general_purpose::STANDARD.decode(&server_data_b64)
+                .or_else(|_| base64::engine::general_purpose::URL_SAFE.decode(&server_data_b64))
+                .or_else(|_| base64::engine::general_purpose::STANDARD_NO_PAD.decode(&server_data_b64)).ok();
+            if let Some(bytes) = raw_bytes {
+                if let Ok(srv_json_str) = String::from_utf8(bytes) {
+                    let mut lock = self.web_context.lock().unwrap();
+                    if let Some(ctx) = lock.as_mut() {
+                        let acquired_at = chrono::Utc::now().timestamp();
+                        ctx.guard_server_data = Some(srv_json_str);
+                        ctx.guard_acquired_at = Some(acquired_at);
+                        *self.cookie_changed.lock().unwrap() = true;
+                        tracing::info!(account = %self.account_alias, "随官方响应成功捕获最新 bd-ticket-guard-server-data，完成票据自动滑动续期");
+                    }
+                }
+            }
+        }
+
         let session_changed=self.web_context.lock().unwrap().as_ref().is_some_and(|c| super::super::im_auth::session_hash(&cookie).ok().as_ref()!=Some(&c.session_hash));
         drop(cookie);
         if session_changed { self.stop_requests(FailureKind::Protocol); }
