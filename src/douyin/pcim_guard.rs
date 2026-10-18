@@ -209,15 +209,15 @@ impl BoundGuardMaterial {
         let cert_pub = data.client_cert.strip_prefix("pub.").unwrap_or(&data.client_cert);
         ensure!(cert_pub == expected_public, "GUARD_KEY_BINDING_MISMATCH");
         let now = chrono::Utc::now().timestamp();
-        ensure!(now.saturating_sub(acquired_at) <= 86400, "GUARD_MATERIAL_EXPIRED_BY_ACQUIRED_AT: 当前账号 Guard 签名票据材料获取已超过 24 小时，已安全拦截发送以防被平台注销会话；请在已登录抖音页面使用油猴脚本(v2.2.3)点击「⚡ 复制 SparkLight 全量凭证」更新导入");
+        ensure!(now.saturating_sub(acquired_at) <= 86400 * 3, "GUARD_MATERIAL_EXPIRED_BY_ACQUIRED_AT: 当前账号 Guard 签名票据材料获取已超过 72 小时有效期，已安全拦截发送以防被平台注销会话；请在已登录抖音页面使用油猴脚本(v2.2.4)点击「⚡ 复制 SparkLight 全量凭证」更新导入");
         if let Some(ct) = data.create_time {
-            ensure!(ct <= 0 || now.saturating_sub(ct) <= 86400, "GUARD_MATERIAL_EXPIRED_BY_CREATE_TIME: 当前账号 Guard 签名票据已过期（生成时间已超过 24 小时），已安全拦截发送以防被平台注销会话；请在已登录抖音页面使用油猴脚本(v2.2.3)点击「⚡ 复制 SparkLight 全量凭证」更新导入");
+            ensure!(ct <= 0 || now.saturating_sub(ct) <= 86400 * 3, "GUARD_MATERIAL_EXPIRED_BY_CREATE_TIME: 当前账号 Guard 签名票据已过期（生成时间已超过 72 小时），已安全拦截发送以防被平台注销会话；请在已登录抖音页面使用油猴脚本(v2.2.4)点击「⚡ 复制 SparkLight 全量凭证」更新导入");
         }
         if let Some(log_id) = &data.log_id {
             if log_id.len() >= 8 && log_id[..8].chars().all(|c| c.is_ascii_digit()) {
                 if let Ok(log_date) = chrono::NaiveDate::parse_from_str(&log_id[..8], "%Y%m%d") {
                     let current_date = chrono::Utc::now().date_naive();
-                    ensure!((current_date - log_date).num_days() <= 1, "GUARD_MATERIAL_EXPIRED_BY_LOG_ID: 当前账号 Guard 签名票据 log_id 显示生成时间早于 1 天前，已安全拦截发送以防被平台注销会话；请在已登录抖音页面使用油猴脚本(v2.2.3)点击「⚡ 复制 SparkLight 全量凭证」更新导入");
+                    ensure!((current_date - log_date).num_days() <= 3, "GUARD_MATERIAL_EXPIRED_BY_LOG_ID: 当前账号 Guard 签名票据 log_id 显示生成时间早于 3 天前，已安全拦截发送以防被平台注销会话；请在已登录抖音页面使用油猴脚本(v2.2.4)点击「⚡ 复制 SparkLight 全量凭证」更新导入");
                 }
             }
         }
@@ -235,11 +235,11 @@ impl BoundGuardMaterial {
     }
     pub fn needs_refresh(&self, now: i64) -> bool {
         if let Some(ct) = self.data.create_time {
-            if ct > 0 && now.saturating_sub(ct) > 7200 {
+            if ct > 0 && now.saturating_sub(ct) > 86400 * 3 {
                 return true;
             }
         }
-        if now.saturating_sub(self.acquired_at) > 7200 {
+        if now.saturating_sub(self.acquired_at) > 86400 * 3 {
             return true;
         }
         false
@@ -248,7 +248,7 @@ impl BoundGuardMaterial {
     pub fn public_key(&self) -> &str { &self.public }
     pub fn acquired_at(&self) -> i64 { self.acquired_at }
     pub fn validate_freshness(&self, now: i64) -> Result<()> {
-        anyhow::ensure!(!self.is_stale(now, 86400), "GUARD_MATERIAL_STALE");
+        anyhow::ensure!(!self.is_stale(now, 86400 * 3), "GUARD_MATERIAL_STALE");
         Ok(())
     }
 }

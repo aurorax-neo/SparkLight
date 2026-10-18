@@ -520,31 +520,14 @@ impl DouyinClient {
         };
 
         let now = chrono::Utc::now().timestamp();
-        let need_refresh = match &material {
-            None => true,
-            Some(mat) => mat.needs_refresh(now),
-        };
-
-        if need_refresh {
-            tracing::info!(account = %self.account_alias, "Guard 票据材料缺失或超过 2 小时新鲜度门限，启动自动换票与续期");
-            match self.refresh_guard_ticket().await {
-                Ok(new_mat) => {
-                    return Ok((key, new_mat));
+        if let Some(mat) = &material {
+            if !mat.is_stale(now, 86400 * 3) {
+                // 优先通过标准只读接口安全拉取 DTrait 中央公钥（若未配置）
+                #[cfg(not(test))]
+                if self.web_context.lock().unwrap().as_ref().and_then(|c| c.dtrait_pk1_pem.as_ref()).is_none() {
+                    self.acquire_dtrait_config().await.ok();
                 }
-                Err(e) => {
-                    tracing::warn!(account = %self.account_alias, error = %e, "自动换票遇到异常");
-                    if let Some(mat) = material {
-                        if !mat.is_stale(now, 86400) {
-                            tracing::warn!(account = %self.account_alias, "回退使用现有未过 24 小时安全周期的 Guard 票据");
-                            return Ok((key, mat));
-                        }
-                    }
-                    #[cfg(test)]
-                    if im_identity_tests::active() {
-                        anyhow::bail!("OFFLINE_MOCK_NO_GUARD_BOUND");
-                    }
-                    return Err(e).context("Guard 票据自动换票失败且无有效备用票据，禁止发送未签名请求以防会话被踢下线");
-                }
+                return Ok((key, mat.clone()));
             }
         }
 
@@ -555,10 +538,11 @@ impl DouyinClient {
         if im_identity_tests::active() {
             anyhow::bail!("OFFLINE_MOCK_NO_GUARD_BOUND");
         }
-        anyhow::bail!("当前账号尚未绑定有效的 Guard 签名票据材料，禁止发送未签名请求以防会话被踢下线");
+        anyhow::bail!("当前账号尚未绑定有效的 Guard 签名票据材料（或已超过 72 小时有效期），已安全拦截发送以防被平台注销会话；请在已登录抖音页面使用油猴脚本点击「⚡ 复制 SparkLight 全量凭证」更新导入");
     }
 
     /// 自动向官方端点换取新鲜的 Guard Ticket 与 DTrait 配置，实现票据自愈与无缝续期。
+    #[allow(dead_code)]
     pub async fn refresh_guard_ticket(&self) -> Result<super::pcim_guard::BoundGuardMaterial> {
         #[cfg(test)]
         if im_identity_tests::active() {
