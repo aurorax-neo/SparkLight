@@ -509,11 +509,6 @@ impl DouyinClient {
         Ok(())
     }
 
-    /// 官方 TokenBeat 机制：停用直接 HTTP 轮询蜜罐接口，避免无头环境中触发平台 401 踢出会话 (session_expired)
-    pub async fn passport_token_beat(&self, _scene: &str) -> Result<bool> {
-        Ok(false)
-    }
-
     /// 确保当前账号具备有效的 GuardKey 与已建联的服务端票据材料。
     pub async fn ensure_guard_bound(&self) -> Result<(super::pcim_guard::GuardKey, super::pcim_guard::BoundGuardMaterial)> {
         let cookie = self.get_current_cookie();
@@ -523,6 +518,36 @@ impl DouyinClient {
             let mat = ctx.get_guard_material(&key, &cookie)?;
             (key, mat)
         };
+
+        let now = chrono::Utc::now().timestamp();
+        let need_refresh = match &material {
+            None => true,
+            Some(mat) => mat.needs_refresh(now),
+        };
+
+        if need_refresh {
+            tracing::info!(account = %self.account_alias, "Guard 票据材料缺失或超过 2 小时新鲜度门限，启动自动换票与续期");
+            match self.refresh_guard_ticket().await {
+                Ok(new_mat) => {
+                    return Ok((key, new_mat));
+                }
+                Err(e) => {
+                    tracing::warn!(account = %self.account_alias, error = %e, "自动换票遇到异常");
+                    if let Some(mat) = material {
+                        if !mat.is_stale(now, 86400) {
+                            tracing::warn!(account = %self.account_alias, "回退使用现有未过 24 小时安全周期的 Guard 票据");
+                            return Ok((key, mat));
+                        }
+                    }
+                    #[cfg(test)]
+                    if im_identity_tests::active() {
+                        anyhow::bail!("OFFLINE_MOCK_NO_GUARD_BOUND");
+                    }
+                    return Err(e).context("Guard 票据自动换票失败且无有效备用票据，禁止发送未签名请求以防会话被踢下线");
+                }
+            }
+        }
+
         if let Some(material) = material {
             return Ok((key, material));
         }
@@ -531,6 +556,123 @@ impl DouyinClient {
             anyhow::bail!("OFFLINE_MOCK_NO_GUARD_BOUND");
         }
         anyhow::bail!("当前账号尚未绑定有效的 Guard 签名票据材料，禁止发送未签名请求以防会话被踢下线");
+    }
+
+    /// 自动向官方端点换取新鲜的 Guard Ticket 与 DTrait 配置，实现票据自愈与无缝续期。
+    pub async fn refresh_guard_ticket(&self) -> Result<super::pcim_guard::BoundGuardMaterial> {
+        #[cfg(test)]
+        if im_identity_tests::active() {
+            anyhow::bail!("OFFLINE_MOCK_REFRESH_TICKET");
+        }
+        let cookie = self.get_current_cookie();
+        let (key, uid, csrf) = {
+            let mut ctx = self.web_context.lock().unwrap().clone().context("缺少 IM 上下文")?;
+            let key = ctx.get_or_create_guard_key()?;
+            let uid = ctx.uid;
+            let csrf = self.extract_cookie_val("passport_csrf_token")
+                .or_else(|| self.extract_cookie_val("passport_csrf_token_default"))
+                .unwrap_or_default();
+            (key, uid, csrf)
+        };
+
+        let pub_b64 = key.public_key_base64();
+        let client_data_json = serde_json::json!({
+            "bd-ticket-guard-version": 2,
+            "bd-ticket-guard-iteration-version": 1,
+            "bd-ticket-guard-ree-public-key": pub_b64,
+            "bd-ticket-guard-web-version": 2,
+        });
+        let client_data_b64 = base64::engine::general_purpose::STANDARD.encode(client_data_json.to_string());
+        let client_data_encoded: String = url::form_urlencoded::byte_serialize(client_data_b64.as_bytes()).collect();
+
+        let cookie_with_guard = {
+            let mut items: Vec<String> = cookie.split(';')
+                .map(|p| p.trim().to_string())
+                .filter(|p| !p.starts_with("bd_ticket_guard_client_data=") && !p.starts_with("bd_ticket_guard_client_web_domain="))
+                .collect();
+            items.push(format!("bd_ticket_guard_client_data={client_data_encoded}"));
+            items.push("bd_ticket_guard_client_web_domain=2".to_string());
+            items.join("; ")
+        };
+        *self.current_cookie.lock().unwrap() = cookie_with_guard;
+
+        let request = self.web_request(
+            Method::POST,
+            "https://www.douyin.com/passport/ticket_guard/get_client_cert/?aid=6383&type=trait&sdk_version=1.0.25&is_from_ttaccountsdk=1",
+        )?
+        .header(header::ACCEPT, "application/json")
+        .header("x-tt-passport-csrf-token", &csrf)
+        .header("bd-ticket-guard-ree-public-key", &pub_b64)
+        .header("bd-ticket-guard-web-version", "2")
+        .header("bd-ticket-guard-version", "2")
+        .header("bd-ticket-guard-iteration-version", "1")
+        .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+        .body("server_data=1&need_session_dtrait=1");
+
+        let (response_headers, bytes, _guard) = self.execute_web(request.build()?).await?;
+        self.merge_response_headers(&response_headers);
+
+        let server_data_b64 = extract_server_data_from_headers(&response_headers)
+            .or_else(|| {
+                if let Ok(json) = serde_json::from_slice::<serde_json::Value>(&bytes) {
+                    json.get("server_data").or_else(|| json.get("bd-ticket-guard-server-data"))
+                        .or_else(|| json.get("data").and_then(|d| d.get("server_data").or_else(|| d.get("bd-ticket-guard-server-data"))))
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string())
+                } else {
+                    None
+                }
+            })
+            .context("换票接口未在响应中下发 bd-ticket-guard-server-data")?;
+
+        let raw_bytes = base64::engine::general_purpose::STANDARD.decode(&server_data_b64)
+            .or_else(|_| base64::engine::general_purpose::URL_SAFE.decode(&server_data_b64))
+            .or_else(|_| base64::engine::general_purpose::STANDARD_NO_PAD.decode(&server_data_b64))
+            .context("base64 解码 bd-ticket-guard-server-data 失败")?;
+        let srv_json_str = String::from_utf8(raw_bytes)
+            .context("bd-ticket-guard-server-data 不是有效的 UTF-8 JSON 文本")?;
+
+        let acquired_at = chrono::Utc::now().timestamp();
+        let material = super::pcim_guard::BoundGuardMaterial::from_saved(
+            &srv_json_str,
+            uid,
+            &self.get_current_cookie(),
+            acquired_at,
+            &pub_b64,
+        ).context("新换取的 Guard 签名票据校验失败")?;
+
+        let aligned_cookie = super::pcim_guard::align_guard_cookie(
+            &self.get_current_cookie(),
+            &pub_b64,
+            Some(&material),
+        );
+        *self.current_cookie.lock().unwrap() = aligned_cookie;
+
+        if let Ok(json) = serde_json::from_slice::<serde_json::Value>(&bytes) {
+            if let Some(data) = json.get("data") {
+                if let (Some(pk1), Some(ver)) = (data.get("x-tt-session-dtrait-pk1").and_then(|v| v.as_str()), data.get("x-tt-session-dtrait-pk1-version").and_then(|v| v.as_str())) {
+                    if let Ok(pem_bytes) = base64::engine::general_purpose::STANDARD.decode(pk1) {
+                        if let Ok(pem) = String::from_utf8(pem_bytes) {
+                            if let Some(mut ctx) = self.web_context.lock().unwrap().clone() {
+                                ctx.set_dtrait_config(&pem, ver);
+                                self.set_web_context(ctx).ok();
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        {
+            let mut lock = self.web_context.lock().unwrap();
+            if let Some(ctx) = lock.as_mut() {
+                ctx.guard_secret_hex = Some(key.to_hex());
+                ctx.guard_server_data = Some(srv_json_str);
+                ctx.guard_acquired_at = Some(acquired_at);
+            }
+        }
+        tracing::info!(account = %self.account_alias, "成功向官方服务端换取全新 Guard Ticket 并完成公钥绑定");
+        Ok(material)
     }
 
     /// 拉取 DTrait 中央公钥配置并缓存在 Web 上下文中。
@@ -1055,6 +1197,47 @@ pub(crate) fn is_fatal_send_error(code: i64, message: &str) -> bool {
         || ["http错误: 401", "http错误: 403", "错误码:401", "错误码:403", "错误码:2154", "错误码:2483"].iter().any(|word| msg.contains(word))
         || ["session", "auth", "cookie", "token", "passport", "login", "verify", "captcha", "conversation", "会话", "鉴权", "身份", "登录", "验证", "风控", "频繁", "禁止发送"]
             .iter().any(|word| msg.contains(word))
+}
+
+fn extract_server_data_from_headers(headers: &reqwest::header::HeaderMap) -> Option<String> {
+    if let Some(val) = headers.get("bd-ticket-guard-server-data") {
+        if let Ok(s) = val.to_str() {
+            if !s.trim().is_empty() {
+                return Some(s.trim().to_string());
+            }
+        }
+    }
+    for cookie in headers.get_all(reqwest::header::SET_COOKIE).iter().filter_map(|h| h.to_str().ok()) {
+        for part in cookie.split(';') {
+            let part = part.trim();
+            if let Some((k, v)) = part.split_once('=') {
+                if k.trim() == "bd_ticket_guard_server_data" {
+                    let decoded = percent_decode_str(v.trim());
+                    if !decoded.is_empty() {
+                        return Some(decoded.to_string());
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+fn percent_decode_str(s: &str) -> String {
+    let mut bytes = Vec::new();
+    let mut chars = s.bytes();
+    while let Some(b) = chars.next() {
+        if b == b'%' {
+            if let (Some(h1), Some(h2)) = (chars.next(), chars.next()) {
+                if let Ok(val) = u8::from_str_radix(std::str::from_utf8(&[h1, h2]).unwrap_or(""), 16) {
+                    bytes.push(val);
+                    continue;
+                }
+            }
+        }
+        bytes.push(b);
+    }
+    String::from_utf8(bytes).unwrap_or_else(|_| s.to_string())
 }
 
 fn parse_im_send_response(data: &[u8]) -> (bool, i64, String, String) {

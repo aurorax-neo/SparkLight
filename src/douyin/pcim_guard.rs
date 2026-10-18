@@ -76,7 +76,8 @@ impl GuardKey {
         ensure!(data.ts_sign.starts_with("ts.1") || data.ts_sign.starts_with("ts.2"), "GUARD_CERT_BRANCH_UNSUPPORTED");
         let public = self.public_key_base64();
         ensure!(data.client_cert.strip_prefix("pub.") == Some(public.as_str()), "GUARD_KEY_BINDING_MISMATCH");
-        Ok(BoundGuardMaterial { data, uid, session_hash: strict_session_hash(cookie)?, acquired_at, public })
+        let raw_server_data = String::from_utf8(json.to_vec()).unwrap_or_else(|_| serde_json::to_string(&data).unwrap_or_default());
+        Ok(BoundGuardMaterial { data, uid, session_hash: strict_session_hash(cookie)?, acquired_at, public, raw_server_data })
     }
     /// 官方响应头载体；拒绝重复头，缺失返回 None，不生成替代材料。
     pub fn bind_response_headers(&self, headers: &HeaderMap, uid: u64, cookie: &str, acquired_at: i64) -> Result<Option<BoundGuardMaterial>> {
@@ -185,14 +186,28 @@ struct ClientData<'a> {
     t_trust: Option<u8>,
 }
 #[derive(Clone, Debug)]
-pub struct BoundGuardMaterial { pub data: ServerMaterial, pub uid: u64, pub session_hash: String, pub acquired_at: i64, pub public: String }
+pub struct BoundGuardMaterial {
+    pub data: ServerMaterial,
+    pub uid: u64,
+    pub session_hash: String,
+    pub acquired_at: i64,
+    pub public: String,
+    pub raw_server_data: String,
+}
 impl BoundGuardMaterial {
     pub fn server_data_json(&self) -> Result<String> {
+        if !self.raw_server_data.is_empty() {
+            return Ok(self.raw_server_data.clone());
+        }
         serde_json::to_string(&self.data).context("GUARD_SERIALIZE_SERVER_DATA")
+    }
+    pub fn compute_crypt_cookie(&self) -> Result<String> {
+        compute_ticket_crypt_cookie(&self.public, &self.data.client_cert, &self.raw_server_data)
     }
     pub fn from_saved(json: &str, uid: u64, cookie: &str, acquired_at: i64, expected_public: &str) -> Result<Self> {
         let data: ServerMaterial = serde_json::from_str(json).context("GUARD_DESERIALIZE_SERVER_DATA")?;
-        ensure!(data.client_cert.strip_prefix("pub.") == Some(expected_public), "GUARD_KEY_BINDING_MISMATCH");
+        let cert_pub = data.client_cert.strip_prefix("pub.").unwrap_or(&data.client_cert);
+        ensure!(cert_pub == expected_public, "GUARD_KEY_BINDING_MISMATCH");
         let now = chrono::Utc::now().timestamp();
         ensure!(now.saturating_sub(acquired_at) <= 86400, "GUARD_MATERIAL_EXPIRED_BY_ACQUIRED_AT: 当前账号 Guard 签名票据材料获取已超过 24 小时，已安全拦截发送以防被平台注销会话；请在已登录抖音页面使用油猴脚本(v2.2.3)点击「⚡ 复制 SparkLight 全量凭证」更新导入");
         if let Some(ct) = data.create_time {
@@ -212,10 +227,22 @@ impl BoundGuardMaterial {
             session_hash: strict_session_hash(cookie)?,
             acquired_at,
             public: expected_public.to_owned(),
+            raw_server_data: json.to_owned(),
         })
     }
     pub fn is_stale(&self, now: i64, max_age_secs: i64) -> bool {
         now.checked_sub(self.acquired_at).map_or(true, |age| age > max_age_secs)
+    }
+    pub fn needs_refresh(&self, now: i64) -> bool {
+        if let Some(ct) = self.data.create_time {
+            if ct > 0 && now.saturating_sub(ct) > 7200 {
+                return true;
+            }
+        }
+        if now.saturating_sub(self.acquired_at) > 7200 {
+            return true;
+        }
+        false
     }
     pub fn ticket(&self) -> &str { &self.data.ticket }
     pub fn public_key(&self) -> &str { &self.public }
@@ -380,8 +407,52 @@ fn strict_session_hash(cookie: &str) -> Result<String> {
 /// 2. 移除旧的 `bd_ticket_guard_client_data`，动态生成与当前公钥严格一致的官方规范 Cookie 元数据：
 ///    `{"bd-ticket-guard-version":2,"bd-ticket-guard-iteration-version":1,"bd-ticket-guard-ree-public-key":"<PUBLIC_KEY>","bd-ticket-guard-web-version":2}`；
 /// 3. 补齐 `bd_ticket_guard_client_web_domain=2`、`_bd_ticket_crypt_doamin=2`、`__security_server_data_status=1`；
-/// 4. 确保发出的 HTTP Header `bd-ticket-guard-ree-public-key` 与 Cookie 中的公钥元数据 100% 吻合，消除分叉导致的平台强制踢下线。
-pub fn align_guard_cookie(old_cookie: &str, public_key_base64: &str) -> String {
+/// 4. 动态计算或安全移除 `_bd_ticket_crypt_cookie`：若提供有效 Guard 材料，动态注入匹配的 MD5 哈希；若无材料则移除残留旧值，根除凭证分叉导致的被踢下线。
+pub fn public_key_to_spki_pem(public_key_base64: &str) -> Result<String> {
+    let raw_bytes = STANDARD.decode(public_key_base64)
+        .context("GUARD_DECODE_PUBLIC_KEY_BASE64")?;
+    ensure!(raw_bytes.len() == 65 && raw_bytes[0] == 0x04, "GUARD_INVALID_SEC1_UNCOMPRESSED_KEY");
+    // 标准 ECDSA P-256 SPKI DER 固定头部 (26 字节)
+    const SPKI_HEADER: [u8; 26] = [
+        0x30, 0x59, // SEQUENCE, 89 bytes
+        0x30, 0x13, // SEQUENCE, 19 bytes
+        0x06, 0x07, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01, // OID: 1.2.840.10045.2.1 (ecPublicKey)
+        0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07, // OID: 1.2.840.10045.3.1.7 (secp256r1)
+        0x03, 0x42, 0x00, // BIT STRING, 66 bytes, 0 unused bits
+    ];
+    let mut spki_der = Vec::with_capacity(91);
+    spki_der.extend_from_slice(&SPKI_HEADER);
+    spki_der.extend_from_slice(&raw_bytes);
+    let b64 = STANDARD.encode(&spki_der);
+    Ok(format!("-----BEGIN PUBLIC KEY-----\n{b64}\n-----END PUBLIC KEY-----"))
+}
+
+/// 计算抖音前端官方规范的 `_bd_ticket_crypt_cookie`：
+/// 公式：MD5(JSON.stringify({ publicKey, cert, serverData }))
+/// 注意：必须严格遵从前端对象声明顺序 publicKey -> cert -> serverData
+#[derive(Serialize)]
+struct CryptCookiePayload<'a> {
+    #[serde(rename = "publicKey")]
+    public_key: &'a str,
+    cert: &'a str,
+    #[serde(rename = "serverData")]
+    server_data: &'a str,
+}
+
+pub fn compute_ticket_crypt_cookie(public_key_base64: &str, client_cert: &str, server_data_json: &str) -> Result<String> {
+    let pem = public_key_to_spki_pem(public_key_base64)?;
+    let payload = CryptCookiePayload {
+        public_key: &pem,
+        cert: client_cert,
+        server_data: server_data_json,
+    };
+    let payload_bytes = serde_json::to_vec(&payload).context("GUARD_SERIALIZE_CRYPT_PAYLOAD")?;
+    let digest = md5::compute(&payload_bytes);
+    Ok(format!("{:x}", digest))
+}
+
+/// 将 Cookie 按照抖音官方 Web Guard 规范进行对齐
+pub fn align_guard_cookie(old_cookie: &str, public_key_base64: &str, material: Option<&BoundGuardMaterial>) -> String {
     let mut map: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
     for item in old_cookie.split(';') {
         let item = item.trim();
@@ -414,6 +485,16 @@ pub fn align_guard_cookie(old_cookie: &str, public_key_base64: &str) -> String {
     map.insert("_bd_ticket_crypt_doamin".into(), "2".into());
     map.insert("__security_server_data_status".into(), "1".into());
 
+    // 关键防御：动态注入计算匹配的 _bd_ticket_crypt_cookie，消除凭证分叉判定！
+    if let Some(mat) = material {
+        if let Ok(crypt_hash) = mat.compute_crypt_cookie() {
+            map.insert("_bd_ticket_crypt_cookie".into(), crypt_hash);
+        }
+    } else {
+        // 若当前无有效 Guard 材料，移除旧的或失效的 crypt_cookie，防止不匹配的残留哈希直接触发全域注销
+        map.remove("_bd_ticket_crypt_cookie");
+    }
+
     map.into_iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join("; ")
 }
 
@@ -438,7 +519,7 @@ mod session_boundary_tests {
         let key = GuardKey::generate();
         let pub_b64 = key.public_key_base64();
         let raw = "sessionid=test_sid; bd_ticket_guard_server_data=old_sd; bd_ticket_guard_web_domain=old_wd; bd_ticket_guard_client_data=old_cd; other=val";
-        let aligned = align_guard_cookie(raw, &pub_b64);
+        let aligned = align_guard_cookie(raw, &pub_b64, None);
         
         assert!(!aligned.contains("bd_ticket_guard_server_data"));
         assert!(!aligned.contains("bd_ticket_guard_web_domain="));
@@ -461,5 +542,26 @@ mod session_boundary_tests {
         
         // 验证 session_hash 在对齐前后完全一致
         assert_eq!(strict_session_hash(raw).unwrap(), strict_session_hash(&aligned).unwrap());
+    }
+
+    #[test]
+    fn test_public_key_to_spki_pem_and_md5_match_browser_ground_truth() {
+        let pub_b64 = "BGFaq8io5SwBjFRtksSx4bzQoVHg2hJfd/2ChRFpZadAoYne0osDEDsFKWBA9ed8vgnj3hhuBvnriTMcyLgY01I=";
+        let pem = public_key_to_spki_pem(pub_b64).unwrap();
+        let expected_pem = "-----BEGIN PUBLIC KEY-----\nMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEYVqryKjlLAGMVG2SxLHhvNChUeDaEl93/YKFEWllp0Chid7SiwMQOwUpYED153y+CePeGG4G+euJMxzIuBjTUg==\n-----END PUBLIC KEY-----";
+        assert_eq!(pem, expected_pem);
+
+        let cert = "pub.BGFaq8io5SwBjFRtksSx4bzQoVHg2hJfd/2ChRFpZadAoYne0osDEDsFKWBA9ed8vgnj3hhuBvnriTMcyLgY01I=";
+        let server_data = "{\"ticket\":\"hash.0OUKYBRXYEFUzzsTWuF70kvix4rQZtG0h3VdSgcdhsI=\",\"ts_sign\":\"ts.2.d9787ffcc11e89c9d693e451e8f7efbd59a2ceca1c635aac443c36d30b6cf08fc4fbe87d2319cf05318624ceda14911ca406dedbebeddb2e30fce8d4fa02575d\",\"client_cert\":\"pub.BGFaq8io5SwBjFRtksSx4bzQoVHg2hJfd/2ChRFpZadAoYne0osDEDsFKWBA9ed8vgnj3hhuBvnriTMcyLgY01I=\",\"log_id\":\"202610171656566DA35E4C1EAA37DDB3F7\",\"create_time\":1792227417}";
+        
+        let md5_hash = compute_ticket_crypt_cookie(pub_b64, cert, server_data).unwrap();
+        assert_eq!(md5_hash, "3f605150b8259e3e9d635033906b031d");
+
+        let material = BoundGuardMaterial::from_saved(server_data, 1, "sessionid=test_cookie", chrono::Utc::now().timestamp(), pub_b64).unwrap();
+        let aligned = align_guard_cookie("sessionid=test_cookie; _bd_ticket_crypt_cookie=old_invalid", pub_b64, Some(&material));
+        assert!(aligned.contains("_bd_ticket_crypt_cookie=3f605150b8259e3e9d635033906b031d"));
+        
+        let cleaned = align_guard_cookie("sessionid=test_cookie; _bd_ticket_crypt_cookie=old_invalid", pub_b64, None);
+        assert!(!cleaned.contains("_bd_ticket_crypt_cookie"));
     }
 }

@@ -75,15 +75,13 @@ impl ConversationTicket {
                     self.uid,
                     &current_cookie,
                     now,
-                    crate::douyin::pcim_guard::GuardMode::Hmac {
-                        server_spki_der: crate::douyin::pcim_guard::OFFICIAL_SERVER_SPKI_DER,
-                    },
+                    crate::douyin::pcim_guard::GuardMode::Ecdsa,
                    is_trusted,
                 )?;
                 for (name, value) in headers {
                     if let Some(n) = name { request.headers_mut().insert(n, value); }
                 }
-                let aligned_cookie = crate::douyin::pcim_guard::align_guard_cookie(&current_cookie, &material.public);
+                let aligned_cookie = crate::douyin::pcim_guard::align_guard_cookie(&current_cookie, &material.public, Some(&material));
                 let mut val = header::HeaderValue::from_str(&aligned_cookie)?;
                 val.set_sensitive(true);
                 request.headers_mut().insert(header::COOKIE, val);
@@ -405,6 +403,7 @@ impl DouyinClient {
             anyhow::ensure!(matches!(self.check_cookie().await,CheckCookieResult::Valid(_)) && ticket.is_current(self), "PCIM_INIT_PREFLIGHT");
             let (key, material) = self.ensure_guard_bound().await
                 .context("PCIM 发送前未确认合法 Guard 签名密钥与有效票据，严禁发出未签名请求以防会话被踢下线")?;
+           self.persist_web_context(&binding.pool, &binding.secret_box, &binding.account_id).await.ok();
             let auth = GuardSendAuth::Signed { key, material };
             let client_id = uuid::Uuid::new_v4().to_string();
             stage = "BUILD";
