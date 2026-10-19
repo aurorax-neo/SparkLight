@@ -72,7 +72,7 @@ impl ConversationTicket {
                 for (name, value) in headers {
                     if let Some(n) = name { request.headers_mut().insert(n, value); }
                 }
-                let aligned_cookie = crate::douyin::pcim_guard::align_guard_cookie(&current_cookie, &material.public, Some(&material));
+                let aligned_cookie = crate::douyin::pcim_guard::align_guard_cookie(&current_cookie, &material.public, Some(&material))?;
                 let mut val = header::HeaderValue::from_str(&aligned_cookie)?;
                 val.set_sensitive(true);
                 request.headers_mut().insert(header::COOKIE, val);

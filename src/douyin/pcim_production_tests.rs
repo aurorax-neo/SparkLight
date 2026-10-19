@@ -319,7 +319,7 @@ async fn full_chain_signed_send_with_guard_signature_and_dtrait() {
         assert!(r.headers().contains_key("bd-ticket-guard-client-data"));
         assert_eq!(r.headers()["bd-ticket-guard-web-version"], "2");
         assert_eq!(r.headers()["bd-ticket-guard-web-sign-type"], "1");
-        assert_eq!(r.headers()["bd-ticket-guard-iteration-version"], "1", "发信请求必须携带官方安全头 bd-ticket-guard-iteration-version: 1");
+        assert!(!r.headers().contains_key("bd-ticket-guard-iteration-version"), "iteration-version 仅存放在 Cookie 中，严禁作为 HTTP 请求头发送");
         assert_eq!(r.headers()["bd-ticket-guard-ree-public-key"].to_str().unwrap(), key.public_key_base64().as_str());
         
         use base64::Engine;
@@ -335,4 +335,59 @@ async fn full_chain_signed_send_with_guard_signature_and_dtrait() {
     let state: String = sqlx::query_scalar("SELECT state FROM im_send_attempts").fetch_one(&pool).await.unwrap();
     assert_eq!(state, "ACCEPTED");
     MODE.with(|s|*s.borrow_mut()=None);
+}
+
+#[tokio::test]
+async fn guard_cookie_repair_and_rotation_recompute_matching_material_hash() {
+    MODE.with(|s| *s.borrow_mut() = None);
+    init(prefix());
+    let pool = database().await;
+    let c = client("guard-cookie-repair");
+    configure(&c, &pool).await;
+
+    let mut cookie = c.get_current_cookie();
+    let marker = "; _bd_ticket_crypt_cookie=";
+    if let Some(start) = cookie.find(marker) {
+        let end = cookie[start + marker.len()..].find(';').map(|offset| start + marker.len() + offset).unwrap_or(cookie.len());
+        cookie.replace_range(start..end, "; _bd_ticket_crypt_cookie=stale-hash");
+    } else {
+        cookie.push_str("; _bd_ticket_crypt_cookie=stale-hash");
+    }
+    *c.current_cookie.lock().unwrap() = cookie;
+    *c.cookie_changed.lock().unwrap() = false;
+
+    assert!(c.repair_bound_guard_cookie().unwrap());
+    assert!(c.is_cookie_changed());
+    assert!(!c.repair_bound_guard_cookie().unwrap());
+    let (key, material) = {
+        let context = c.web_context.lock().unwrap();
+        let ctx = context.as_ref().unwrap();
+        let key = ctx.get_guard_key().unwrap().unwrap();
+        let material = ctx.get_guard_material(&key, &c.get_current_cookie()).unwrap().unwrap();
+        (key, material)
+    };
+    assert!(c.get_current_cookie().contains(&format!("_bd_ticket_crypt_cookie={}", material.compute_crypt_cookie().unwrap())));
+
+    let rotated = serde_json::to_vec(&serde_json::json!({
+        "ticket": "rotated-guard-ticket",
+        "ts_sign": "ts.2.rotated",
+        "client_cert": format!("pub.{}", key.public_key_base64()),
+    })).unwrap();
+    let rotated_text = String::from_utf8(rotated.clone()).unwrap();
+    let mut headers = header::HeaderMap::new();
+    headers.insert(
+        "bd-ticket-guard-server-data",
+        header::HeaderValue::from_str(&base64::engine::general_purpose::STANDARD.encode(&rotated)).unwrap(),
+    );
+    c.merge_response_headers(&headers);
+
+    let expected = crate::douyin::pcim_guard::compute_ticket_crypt_cookie(
+        &key.public_key_base64(),
+        &format!("pub.{}", key.public_key_base64()),
+        &rotated_text,
+    ).unwrap();
+    assert!(c.get_current_cookie().contains(&format!("_bd_ticket_crypt_cookie={expected}")));
+    assert!(!c.get_current_cookie().contains("bd_ticket_guard_server_data="));
+    let context = c.web_context.lock().unwrap();
+    assert_eq!(context.as_ref().unwrap().guard_server_data.as_deref(), Some(rotated_text.as_str()));
 }

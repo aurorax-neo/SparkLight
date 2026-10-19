@@ -153,6 +153,36 @@ impl BarkNotifier {
         self.send_notification(key_override, title, &body, None).await
     }
 
+    /// 登录会话临近到期提醒。平台不提供无交互滑动续期，`sid_guard` 到期后必须重新登录同步。
+    pub async fn send_cookie_expiring_alert(
+        &self,
+        account_alias: &str,
+        nickname: Option<&str>,
+        remaining_days: i64,
+        key_override: Option<&str>,
+    ) -> Result<()> {
+        if !self.scheduler_alert_enabled.load(Ordering::Relaxed) {
+            tracing::info!("Bark 到期提醒已物理硬拦截：当前非每日定时任务执行期，严禁向 Bark 发送任何告警通知");
+            return Ok(());
+        }
+        let last = self.manual_silence_timestamp.load(Ordering::Relaxed);
+        if last > 0 {
+            let now = chrono::Utc::now().timestamp();
+            let diff = now - last;
+            if (-60..=1800).contains(&diff) {
+                tracing::info!(diff_secs = diff, "Bark 到期提醒已物理拦截：处于前台手动操作静默期 (30分钟窗口内)");
+                return Ok(());
+            }
+        }
+        let display_name = nickname.unwrap_or("未命名账号");
+        let title = "【抖音火花助手】登录凭证即将到期";
+        let body = format!(
+            "账号「{account_alias}」（{display_name}）登录凭证约 {remaining_days} 天后到期。\n抖音网页端登录会话由服务端固定有效期，无法自动续期；请在到期前重新登录并同步一次凭证，避免续火花中断。"
+        );
+
+        self.send_notification(key_override, title, &body, None).await
+    }
+
     pub async fn test_push(server: &str, key: &str) -> Result<()> {
         let client = Client::builder().timeout(Duration::from_secs(10)).build()?;
         let server = server.trim_end_matches('/');

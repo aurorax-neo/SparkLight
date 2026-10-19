@@ -216,10 +216,12 @@ impl DouyinClient {
         let set: Vec<_> = headers.get_all(header::SET_COOKIE).iter().filter_map(|h| h.to_str().ok())
             .filter(|value| !initial || !session_auth::pcim_init::old_guard(value.split('=').next().unwrap_or(""))).collect();
         let mut cookie = self.current_cookie.lock().unwrap();
-        let (updated, changed) = merge_cookies(&cookie, &set);
-        if changed { *cookie = updated; *self.cookie_changed.lock().unwrap() = true; }
+        let (updated, set_cookie_changed) = merge_cookies(&cookie, &set);
+        if set_cookie_changed { *cookie = updated; }
+        let mut changed = set_cookie_changed;
 
-        // 自动提取服务端下发的最新 bd-ticket-guard-server-data，实现票据自愈与滑动续期
+        // 服务端每轮响应都可能轮转 Guard 材料。材料、公钥与 crypt cookie 必须原子对齐，
+        // 否则下一次签名发送会被平台识别为凭证分叉并注销整个会话。
         if let Some(server_data_b64) = super::extract_server_data_from_headers(headers) {
             use base64::Engine;
             let raw_bytes = base64::engine::general_purpose::STANDARD.decode(&server_data_b64)
@@ -227,17 +229,33 @@ impl DouyinClient {
                 .or_else(|_| base64::engine::general_purpose::STANDARD_NO_PAD.decode(&server_data_b64)).ok();
             if let Some(bytes) = raw_bytes {
                 if let Ok(srv_json_str) = String::from_utf8(bytes) {
-                    let mut lock = self.web_context.lock().unwrap();
-                    if let Some(ctx) = lock.as_mut() {
-                        let acquired_at = chrono::Utc::now().timestamp();
-                        ctx.guard_server_data = Some(srv_json_str);
-                        ctx.guard_acquired_at = Some(acquired_at);
-                        *self.cookie_changed.lock().unwrap() = true;
-                        tracing::info!(account = %self.account_alias, "随官方响应成功捕获最新 bd-ticket-guard-server-data，完成票据自动滑动续期");
+                    let mut context = self.web_context.lock().unwrap();
+                    if let Some(ctx) = context.as_mut() {
+                        if let Ok(Some(key)) = ctx.get_guard_key() {
+                            let public_key = key.public_key_base64();
+                            let acquired_at = chrono::Utc::now().timestamp();
+                            if let Ok(material) = crate::douyin::pcim_guard::BoundGuardMaterial::from_saved(
+                                &srv_json_str,
+                                ctx.uid,
+                                &cookie,
+                                acquired_at,
+                                &public_key,
+                            ) {
+                                if let Ok(aligned) = crate::douyin::pcim_guard::align_guard_cookie(&cookie, &public_key, Some(&material)) {
+                                    if aligned != *cookie {
+                                        *cookie = aligned;
+                                        changed = true;
+                                    }
+                                    ctx.set_guard_material(&material).ok();
+                                    tracing::info!(account = %self.account_alias, "已对齐最新 Guard 材料与 _bd_ticket_crypt_cookie，完成票据自愈");
+                                }
+                            }
+                        }
                     }
                 }
             }
         }
+        if changed { *self.cookie_changed.lock().unwrap() = true; }
 
         let session_changed=self.web_context.lock().unwrap().as_ref().is_some_and(|c| super::super::im_auth::session_hash(&cookie).ok().as_ref()!=Some(&c.session_hash));
         drop(cookie);

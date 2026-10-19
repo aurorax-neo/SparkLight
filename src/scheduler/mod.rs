@@ -252,6 +252,25 @@ impl SparkEngine {
         (-60..=1800).contains(&diff)
     }
 
+    /// 登录会话临期预警。`sid_guard` 由平台服务端固定有效期，无法无交互续期，
+    /// 因此只在剩余不足 7 天时提前一次告知，避免用户被动发现断签。
+    async fn warn_on_session_expiry(&self, account: &Account, cookie: &str, notify_on_failure: bool) {
+        let Some(expiry) = crate::douyin::im_auth::sid_guard_expiry(cookie) else { return; };
+        let remaining = expiry - Utc::now().timestamp();
+        if remaining > 7 * 86400 {
+            return;
+        }
+        let remaining_days = remaining.div_euclid(86400).max(0);
+        tracing::warn!(account = %account.alias, remaining_days, "抖音登录会话临近到期，需重新登录同步凭证");
+        if !notify_on_failure || self.is_in_manual_silence_window() {
+            return;
+        }
+        self.record_log(&account.id, &account.alias, None, None, "SESSION_EXPIRING", "SUCCESS",
+            &format!("登录会话约 {remaining_days} 天后到期，请在到期前重新登录并同步凭证")).await.ok();
+        self.notifier.send_cookie_expiring_alert(&account.alias, account.nickname.as_deref(), remaining_days,
+            account.bark_key_override.as_deref()).await.ok();
+    }
+
     pub fn delay_range(&self) -> (u64,u64) { *self.delay_settings.borrow() }
 
     pub(crate) fn set_delay_range(&self,min:u64,max:u64) {
@@ -316,6 +335,9 @@ impl SparkEngine {
         let client = DouyinClient::new(&plaintext_cookie, &account.alias)?;
         client.load_web_context(&self.pool,&self.secret_box,&account.id,account.uid.as_deref()).await
             .context(ExecutionDiagnostic::WebContextInvalid)?;
+        if client.repair_bound_guard_cookie()? {
+            tracing::info!(account = %account.alias, "检测到历史 Guard Cookie 与当前票据材料不一致，已在发网前完成本地重算对齐");
+        }
         let check_res = client.check_cookie().await;
 
         // Cookie 变化不等于续期；只保存已观察到的更新。
@@ -339,6 +361,7 @@ impl SparkEngine {
 
         match check_res {
             crate::douyin::types::CheckCookieResult::Valid(profile) => {
+                self.warn_on_session_expiry(&account, &plaintext_cookie, notify_on_failure).await;
                 if account.uid.as_deref().is_some_and(|uid| uid != profile.uid) {
                     let _=client.verified_sender_uid(account.uid.as_deref());
                     db::update_account_status(&self.pool, &account.id, "EXPIRED", Utc::now()).await?;

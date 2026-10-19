@@ -22,6 +22,23 @@ pub const OFFICIAL_SERVER_SPKI_DER: &[u8] = &[
 /// 无 Debug/Serialize 或私钥导出接口；只能生成独立密钥。
 #[derive(Clone)]
 pub struct GuardKey { secret: SecretKey }
+
+/// 官方 Web SDK `bd_ticket_guard_client_data` 的声明体。
+/// 字段顺序必须与官方逐字节一致：version -> iteration-version -> ree-public-key -> web-version。
+/// 严禁改用 `serde_json::json!`，该宏在默认配置下会按字母排序，导致指纹与官方不一致。
+#[derive(Serialize)]
+struct GuardDeclaration<'a> {
+    #[serde(rename="bd-ticket-guard-version")] version: u8,
+    #[serde(rename="bd-ticket-guard-iteration-version")] iteration: u8,
+    #[serde(rename="bd-ticket-guard-ree-public-key")] public: &'a str,
+    #[serde(rename="bd-ticket-guard-web-version")] web_version: u8,
+}
+
+pub fn guard_declaration_json(public_key_base64: &str) -> Result<String> {
+    serde_json::to_string(&GuardDeclaration { version: 2, iteration: 1, public: public_key_base64, web_version: 2 })
+        .context("GUARD_ENCODE_FAILED")
+}
+
 impl GuardKey {
     pub fn generate() -> Self { Self { secret: SecretKey::random(&mut rand::rngs::OsRng) } }
     pub fn from_slice(bytes: &[u8]) -> Result<Self> {
@@ -49,15 +66,7 @@ impl GuardKey {
     }
     /// 官方 _processCookie 的公钥初始化声明；不是发送签名，也不是服务端授权。
     pub fn initialization_cookie_value(&self) -> Result<String> {
-        #[derive(Serialize)]
-        struct Declaration {
-            #[serde(rename="bd-ticket-guard-version")] version: u8,
-            #[serde(rename="bd-ticket-guard-iteration-version")] iteration: u8,
-            #[serde(rename="bd-ticket-guard-ree-public-key")] public: String,
-            #[serde(rename="bd-ticket-guard-web-version")] web_version: u8,
-        }
-        let declaration = Declaration { version:2, iteration:1, public:self.public_key_base64(), web_version:2 };
-        Ok(STANDARD.encode(serde_json::to_vec(&declaration).context("GUARD_ENCODE_FAILED")?))
+        Ok(STANDARD.encode(guard_declaration_json(&self.public_key_base64())?.as_bytes()))
     }
     pub fn initialization_headers(&self) -> Result<HeaderMap> {
         let mut headers = HeaderMap::new();
@@ -65,7 +74,6 @@ impl GuardKey {
         headers.insert("bd-ticket-guard-web-version",HeaderValue::from_static("2"));
         headers.insert("bd-ticket-guard-web-sign-type",HeaderValue::from_static("0"));
         headers.insert("bd-ticket-guard-version",HeaderValue::from_static("2"));
-        headers.insert("bd-ticket-guard-iteration-version",HeaderValue::from_static("1"));
         Ok(headers)
     }
     /// 只接收预期官方 HTTPS 响应解析出的材料。调用方仍须校验来源/账号身份。
@@ -158,7 +166,6 @@ impl GuardKey {
             ("bd-ticket-guard-web-version", if material.data.ts_sign.starts_with("ts.1") { "1" } else { "2" }),
             ("bd-ticket-guard-web-sign-type", sign_type),
             ("bd-ticket-guard-version", "2"),
-            ("bd-ticket-guard-iteration-version", "1"),
             ("bd-ticket-guard-client-data", value.as_str()),
         ] {
             let mut header = HeaderValue::from_str(text).map_err(|_| anyhow::anyhow!("GUARD_INVALID_HEADER"))?;
@@ -270,7 +277,7 @@ mod tests {
         let expected=format!("{{\"bd-ticket-guard-version\":2,\"bd-ticket-guard-iteration-version\":1,\"bd-ticket-guard-ree-public-key\":\"{}\",\"bd-ticket-guard-web-version\":2}}",key.public_key_base64());
         assert_eq!(declaration,expected.as_bytes());
         let initial=key.initialization_headers().unwrap();
-        assert_eq!(initial.len(),5);
+        assert_eq!(initial.len(),4);
         assert_eq!(initial["bd-ticket-guard-web-sign-type"],"0");
         assert!(!initial.contains_key("bd-ticket-guard-client-data"));
         for prefix in ["ts.1", "ts.2"] {
@@ -279,8 +286,8 @@ mod tests {
             assert_eq!(key.public_key_base64().len(),88);
             assert_eq!(headers["bd-ticket-guard-web-version"],if prefix=="ts.1" {"1"}else{"2"});
             assert_eq!(headers["bd-ticket-guard-web-sign-type"],"0");
-            assert_eq!(headers["bd-ticket-guard-iteration-version"],"1");
-            assert_eq!(headers.len(), 6);
+            assert!(!headers.contains_key("bd-ticket-guard-iteration-version"));
+            assert_eq!(headers.len(), 5);
             assert!(headers.values().all(|v|v.is_sensitive()));
             let decoded=STANDARD.decode(headers["bd-ticket-guard-client-data"].as_bytes()).unwrap();
             let data:serde_json::Value=serde_json::from_slice(&decoded).unwrap();
@@ -409,7 +416,7 @@ fn strict_session_hash(cookie: &str) -> Result<String> {
 /// 2. 移除旧的 `bd_ticket_guard_client_data`，动态生成与当前公钥严格一致的官方规范 Cookie 元数据：
 ///    `{"bd-ticket-guard-version":2,"bd-ticket-guard-iteration-version":1,"bd-ticket-guard-ree-public-key":"<PUBLIC_KEY>","bd-ticket-guard-web-version":2}`；
 /// 3. 补齐 `bd_ticket_guard_client_web_domain=2`、`_bd_ticket_crypt_doamin=2`、`__security_server_data_status=1`；
-/// 4. 动态计算或安全移除 `_bd_ticket_crypt_cookie`：若提供有效 Guard 材料，动态注入匹配的 MD5 哈希；若无材料则移除残留旧值，根除凭证分叉导致的被踢下线。
+/// 4. 动态计算或安全移除 `_bd_ticket_crypt_cookie`：若提供有效 Guard 材料，强制重算并覆盖匹配的 MD5 哈希；若无材料则移除残留旧值，根除凭证分叉导致的被踢下线。
 pub fn public_key_to_spki_pem(public_key_base64: &str) -> Result<String> {
     let raw_bytes = STANDARD.decode(public_key_base64)
         .context("GUARD_DECODE_PUBLIC_KEY_BASE64")?;
@@ -454,7 +461,7 @@ pub fn compute_ticket_crypt_cookie(public_key_base64: &str, client_cert: &str, s
 }
 
 /// 将 Cookie 按照抖音官方 Web Guard 规范进行对齐
-pub fn align_guard_cookie(old_cookie: &str, public_key_base64: &str, material: Option<&BoundGuardMaterial>) -> String {
+pub fn align_guard_cookie(old_cookie: &str, public_key_base64: &str, material: Option<&BoundGuardMaterial>) -> Result<String> {
     let mut map: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
     for item in old_cookie.split(';') {
         let item = item.trim();
@@ -471,14 +478,9 @@ pub fn align_guard_cookie(old_cookie: &str, public_key_base64: &str, material: O
     map.remove("bd_ticket_guard_server_data");
     map.remove("bd_ticket_guard_web_domain");
 
-    // 注入与当前公钥对齐的官方 ClientData 元数据
-    let client_data_json = serde_json::json!({
-        "bd-ticket-guard-version": 2,
-        "bd-ticket-guard-iteration-version": 1,
-        "bd-ticket-guard-ree-public-key": public_key_base64,
-        "bd-ticket-guard-web-version": 2,
-    });
-    let client_data_b64 = STANDARD.encode(client_data_json.to_string());
+    // 注入与当前公钥对齐的官方 ClientData 元数据；必须复用官方字段顺序。
+    let client_data_json = guard_declaration_json(public_key_base64)?;
+    let client_data_b64 = STANDARD.encode(client_data_json.as_bytes());
     // 官方 Web SDK 在 Cookie 中使用 encodeURIComponent 存储，对末尾 padding '=' 进行转义
     let client_data_cookie = client_data_b64.replace('=', "%3D");
 
@@ -487,17 +489,17 @@ pub fn align_guard_cookie(old_cookie: &str, public_key_base64: &str, material: O
     map.insert("_bd_ticket_crypt_doamin".into(), "2".into());
     map.insert("__security_server_data_status".into(), "1".into());
 
-    // 关键防御：如果原 Cookie 已有原生 _bd_ticket_crypt_cookie，严格保留原生值，严禁人工重算覆盖！
-    // 仅在原生 Cookie 缺失该字段且提供有效 Guard 材料时才计算补齐。
-    if !map.contains_key("_bd_ticket_crypt_cookie") {
-        if let Some(mat) = material {
-            if let Ok(crypt_hash) = mat.compute_crypt_cookie() {
-                map.insert("_bd_ticket_crypt_cookie".into(), crypt_hash);
-            }
+    // 服务端每轮 response 都可能轮转 server_data。旧 crypt cookie 即使曾由浏览器原生生成，
+    // 也会与当前公钥及材料形成分叉；只要材料有效就必须按同一三元组强制重算。
+    if let Some(mat) = material {
+        if let Ok(crypt_hash) = mat.compute_crypt_cookie() {
+            map.insert("_bd_ticket_crypt_cookie".into(), crypt_hash);
         }
+    } else {
+        map.remove("_bd_ticket_crypt_cookie");
     }
 
-    map.into_iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join("; ")
+    Ok(map.into_iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join("; "))
 }
 
 #[cfg(test)]
@@ -517,11 +519,32 @@ mod session_boundary_tests {
     }
 
     #[test]
+    fn guard_declaration_matches_official_field_order() {
+        // 官方 Web SDK 解码后的 bd_ticket_guard_client_data 逐字节顺序：
+        // version -> iteration-version -> ree-public-key -> web-version
+        let key = GuardKey::generate();
+        let pub_b64 = key.public_key_base64();
+        let json = guard_declaration_json(&pub_b64).unwrap();
+        let expected = format!(
+            "{{\"bd-ticket-guard-version\":2,\"bd-ticket-guard-iteration-version\":1,\"bd-ticket-guard-ree-public-key\":\"{pub_b64}\",\"bd-ticket-guard-web-version\":2}}"
+        );
+        assert_eq!(json, expected, "声明字段顺序必须与官方逐字节一致");
+        assert_eq!(key.initialization_cookie_value().unwrap(), STANDARD.encode(expected.as_bytes()));
+
+        let aligned = align_guard_cookie("sessionid=test_sid", &pub_b64, None).unwrap();
+        let cookie_value = aligned.split("; ")
+            .find_map(|item| item.strip_prefix("bd_ticket_guard_client_data="))
+            .expect("必须写入 bd_ticket_guard_client_data");
+        assert!(cookie_value.ends_with("%3D%3D"), "官方以 encodeURIComponent 存储，padding 必须转义为 %3D");
+        assert_eq!(STANDARD.decode(cookie_value.replace("%3D", "=")).unwrap(), expected.as_bytes());
+    }
+
+    #[test]
     fn test_align_guard_cookie_cleans_server_data_and_injects_matching_client_data() {
         let key = GuardKey::generate();
         let pub_b64 = key.public_key_base64();
         let raw = "sessionid=test_sid; bd_ticket_guard_server_data=old_sd; bd_ticket_guard_web_domain=old_wd; bd_ticket_guard_client_data=old_cd; other=val";
-        let aligned = align_guard_cookie(raw, &pub_b64, None);
+        let aligned = align_guard_cookie(raw, &pub_b64, None).unwrap();
         
         assert!(!aligned.contains("bd_ticket_guard_server_data"));
         assert!(!aligned.contains("bd_ticket_guard_web_domain="));
@@ -560,15 +583,15 @@ mod session_boundary_tests {
         assert_eq!(md5_hash, "3f605150b8259e3e9d635033906b031d");
 
         let material = BoundGuardMaterial::from_saved(server_data, 1, "sessionid=test_cookie", chrono::Utc::now().timestamp(), pub_b64).unwrap();
-        // 原生已存在 _bd_ticket_crypt_cookie 时，严格保留原生值，绝不覆盖
-        let aligned_keep = align_guard_cookie("sessionid=test_cookie; _bd_ticket_crypt_cookie=native_hash_123", pub_b64, Some(&material));
-        assert!(aligned_keep.contains("_bd_ticket_crypt_cookie=native_hash_123"), "必须保留原生 crypt_cookie");
+        // 已有历史 crypt cookie 时必须按当前材料覆盖，避免公钥与哈希分叉
+        let aligned_replace = align_guard_cookie("sessionid=test_cookie; _bd_ticket_crypt_cookie=native_hash_123", pub_b64, Some(&material)).unwrap();
+        assert!(aligned_replace.contains("_bd_ticket_crypt_cookie=3f605150b8259e3e9d635033906b031d"));
 
-        // 原生缺失 _bd_ticket_crypt_cookie 时，由材料动态计算补齐
-        let aligned_fill = align_guard_cookie("sessionid=test_cookie", pub_b64, Some(&material));
+        // 缺失 _bd_ticket_crypt_cookie 时同样由材料计算补齐
+        let aligned_fill = align_guard_cookie("sessionid=test_cookie", pub_b64, Some(&material)).unwrap();
         assert!(aligned_fill.contains("_bd_ticket_crypt_cookie=3f605150b8259e3e9d635033906b031d"));
         
-        let kept_without_mat = align_guard_cookie("sessionid=test_cookie; _bd_ticket_crypt_cookie=native_hash_123", pub_b64, None);
-        assert!(kept_without_mat.contains("_bd_ticket_crypt_cookie=native_hash_123"));
+        let cleaned_without_mat = align_guard_cookie("sessionid=test_cookie; _bd_ticket_crypt_cookie=native_hash_123", pub_b64, None).unwrap();
+        assert!(!cleaned_without_mat.contains("_bd_ticket_crypt_cookie"));
     }
 }

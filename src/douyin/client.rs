@@ -241,6 +241,28 @@ impl DouyinClient {
         *self.cookie_changed.lock().unwrap()
     }
 
+    /// 修复历史版本遗留的 Guard Cookie 分叉。只使用已保存且与当前密钥、账号绑定的材料，
+    /// 不生成新密钥，也不发起网络请求。
+    pub fn repair_bound_guard_cookie(&self) -> Result<bool> {
+        let cookie = self.get_current_cookie();
+        let (key, material) = {
+            let context = self.web_context.lock().unwrap();
+            let Some(ctx) = context.as_ref() else { return Ok(false); };
+            let Some(key) = ctx.get_guard_key()? else { return Ok(false); };
+            let Some(material) = ctx.get_guard_material(&key, &cookie)? else { return Ok(false); };
+            (key, material)
+        };
+        let aligned = super::pcim_guard::align_guard_cookie(&cookie, &key.public_key_base64(), Some(&material))?;
+        if aligned == cookie {
+            return Ok(false);
+        }
+        let unchanged_session = super::im_auth::session_hash(&aligned)? == super::im_auth::session_hash(&cookie)?;
+        anyhow::ensure!(unchanged_session, "Guard Cookie 对齐不得改变登录会话");
+        *self.current_cookie.lock().unwrap() = aligned;
+        *self.cookie_changed.lock().unwrap() = true;
+        Ok(true)
+    }
+
     pub fn extract_cookie_val(&self, name: &str) -> Option<String> {
         let guard = self.current_cookie.lock().unwrap();
         for item in guard.split(';') {
@@ -560,14 +582,11 @@ impl DouyinClient {
         };
 
         let pub_b64 = key.public_key_base64();
-        let client_data_json = serde_json::json!({
-            "bd-ticket-guard-version": 2,
-            "bd-ticket-guard-iteration-version": 1,
-            "bd-ticket-guard-ree-public-key": pub_b64,
-            "bd-ticket-guard-web-version": 2,
-        });
-        let client_data_b64 = base64::engine::general_purpose::STANDARD.encode(client_data_json.to_string());
-        let client_data_encoded: String = url::form_urlencoded::byte_serialize(client_data_b64.as_bytes()).collect();
+        // 必须复用官方字段顺序；官方仅用 encodeURIComponent 转义 padding '='，
+        // 套用 form_urlencoded 会额外转义 '+' 与 '/'，与浏览器指纹不一致。
+        let client_data_b64 = base64::engine::general_purpose::STANDARD
+            .encode(super::pcim_guard::guard_declaration_json(&pub_b64)?.as_bytes());
+        let client_data_encoded = client_data_b64.replace('=', "%3D");
 
         let cookie_with_guard = {
             let mut items: Vec<String> = cookie.split(';')
@@ -589,7 +608,6 @@ impl DouyinClient {
         .header("bd-ticket-guard-ree-public-key", &pub_b64)
         .header("bd-ticket-guard-web-version", "2")
         .header("bd-ticket-guard-version", "2")
-        .header("bd-ticket-guard-iteration-version", "1")
         .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
         .body("server_data=1&need_session_dtrait=1");
 
@@ -629,7 +647,7 @@ impl DouyinClient {
             &self.get_current_cookie(),
             &pub_b64,
             Some(&material),
-        );
+        )?;
         *self.current_cookie.lock().unwrap() = aligned_cookie;
 
         if let Ok(json) = serde_json::from_slice::<serde_json::Value>(&bytes) {

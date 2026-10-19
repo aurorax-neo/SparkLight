@@ -7,6 +7,28 @@ use super::client::{encode_field_bytes, encode_field_varint, parse_protobuf_fiel
 
 pub const MAX_AGE_SECS: i64 = 30 * 86400;
 
+/// 解析 `sid_guard` 登录会话的绝对过期时间（Unix 秒）。
+///
+/// 官方 Web 端格式为 `<sid>|<login_ts>|<max_age>|<过期时间字符串>`，Cookie 中 `|` 会被
+/// encodeURIComponent 转义成 `%7C`。过期时间直接由 `login_ts + max_age` 推导，
+/// 避免依赖本地时区解析英文日期串。
+/// 该值只用于到期预警：平台不接受无交互的登录会话滑动续期，到期必须重新登录同步。
+pub fn sid_guard_expiry(cookie: &str) -> Option<i64> {
+    let raw = cookie
+        .split(';')
+        .map(str::trim)
+        .find_map(|item| item.strip_prefix("sid_guard="))?;
+    let decoded = raw.replace("%7C", "|").replace("%7c", "|");
+    let mut parts = decoded.split('|');
+    let _sid = parts.next()?;
+    let login_ts: i64 = parts.next()?.trim().parse().ok()?;
+    let max_age: i64 = parts.next()?.trim().parse().ok()?;
+    if login_ts <= 0 || max_age <= 0 {
+        return None;
+    }
+    login_ts.checked_add(max_age)
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 pub struct ImSendCredential {
     pub uid: u64,
@@ -518,6 +540,21 @@ mod tests {
         ctx.captured_at = i64::MIN;
         assert_eq!(ctx.history_status(Some(&uid), cookie, now).0, "EXPIRED");
     }
+    #[test]
+    fn sid_guard_expiry_uses_login_time_plus_max_age() {
+        // 官方 Web 端实测样例形态：URL 编码的 `|` 与 60 天有效期
+        let cookie = "sessionid=abc; sid_guard=abc%7C1792375077%7C5184000%7CFri%2C+18-Dec-2026+01%3A57%3A57+GMT; sid_tt=abc";
+        assert_eq!(sid_guard_expiry(cookie), Some(1792375077 + 5_184_000));
+        // 未编码形态同样可解析
+        assert_eq!(sid_guard_expiry("sid_guard=abc|1792375077|5184000|Fri, 18-Dec-2026 01:57:57 GMT"),
+            Some(1792375077 + 5_184_000));
+        // 缺失、损坏或非正数一律返回 None，不得推断出错误的到期时间
+        assert_eq!(sid_guard_expiry("sessionid=abc"), None);
+        assert_eq!(sid_guard_expiry("sid_guard=abc"), None);
+        assert_eq!(sid_guard_expiry("sid_guard=abc|0|5184000|x"), None);
+        assert_eq!(sid_guard_expiry("sid_guard=abc|1792375077|0|x"), None);
+    }
+
     #[test]
     fn session_initialization_and_identity_are_separate_from_send_authority() {
         let cookie="sessionid=public-session";
