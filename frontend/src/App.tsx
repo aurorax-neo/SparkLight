@@ -114,7 +114,7 @@ const AppContent: React.FC = () => {
         onLogout={handleLogout}
       />
 
-      <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-6">
+      <main className="flex-1 max-w-[1800px] w-full mx-auto px-4 sm:px-6 lg:px-8 py-4">
         {VALID_TABS.filter((tab) => visitedTabs.has(tab) || tab === activeTab).map((tab) => (
           <section key={tab} hidden={activeTab !== tab} aria-label={tab}>
             {tab === 'dashboard' && (

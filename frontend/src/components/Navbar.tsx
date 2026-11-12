@@ -16,6 +16,7 @@ import {
 import { api } from '../api/client';
 import { useToast } from './ui/Toast';
 import { ConfirmModal } from './ui/ConfirmModal';
+import { formatBeijingClock } from '../utils/datetime';
 
 export type TabType = 'dashboard' | 'accounts' | 'targets' | 'logs' | 'settings';
 
@@ -24,16 +25,6 @@ interface Props {
   setActiveTab: (tab: TabType) => void;
   onTriggerRefresh: () => void;
   onLogout: () => void;
-}
-
-function formatCurrentDateTime(date: Date): string {
-  const y = date.getFullYear();
-  const m = String(date.getMonth() + 1).padStart(2, '0');
-  const d = String(date.getDate()).padStart(2, '0');
-  const hh = String(date.getHours()).padStart(2, '0');
-  const mm = String(date.getMinutes()).padStart(2, '0');
-  const ss = String(date.getSeconds()).padStart(2, '0');
-  return `${y}年${m}月${d}日 ${hh}:${mm}:${ss}`;
 }
 
 export const Navbar: React.FC<Props> = ({
@@ -46,12 +37,12 @@ export const Navbar: React.FC<Props> = ({
   const [isRunningAll, setIsRunningAll] = useState(false);
   const [isConfirmAllOpen, setIsConfirmAllOpen] = useState(false);
   const [isDark, setIsDark] = useState(() => document.documentElement.classList.contains('dark'));
-  const [currentTimeStr, setCurrentTimeStr] = useState(() => formatCurrentDateTime(new Date()));
+  const [currentTimeStr, setCurrentTimeStr] = useState(() => formatBeijingClock(new Date()));
 
   // Live ticking clock every second
   useEffect(() => {
     const timer = setInterval(() => {
-      setCurrentTimeStr(formatCurrentDateTime(new Date()));
+      setCurrentTimeStr(formatBeijingClock(new Date()));
     }, 1000);
     return () => clearInterval(timer);
   }, []);
@@ -95,7 +86,7 @@ export const Navbar: React.FC<Props> = ({
   return (
     <>
       <header className="sticky top-0 z-30 w-full border-b border-slate-200/80 dark:border-slate-800/80 bg-white/80 dark:bg-slate-900/80 backdrop-blur-md">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 flex flex-wrap xl:flex-nowrap items-center justify-between gap-x-4 gap-y-2 py-3 xl:py-0 xl:h-16">
+        <div className="max-w-[1800px] mx-auto px-4 sm:px-6 lg:px-8 flex flex-wrap xl:flex-nowrap items-center justify-between gap-x-4 gap-y-2 py-2.5 xl:py-0 xl:h-14">
           {/* Brand */}
           <div className="flex shrink-0 items-center gap-3">
             <div className="flex items-center justify-center w-10 h-10 rounded-xl bg-gradient-to-tr from-amber-500 via-orange-500 to-rose-500 text-white shadow-md shadow-orange-500/20">
@@ -142,7 +133,10 @@ export const Navbar: React.FC<Props> = ({
           {/* Right Action Controls: Live Clock & Action Buttons */}
           <div className="flex shrink-0 items-center gap-2.5 whitespace-nowrap">
             {/* Live Clock */}
-            <div className="hidden 2xl:flex shrink-0 items-center gap-1.5 px-2.5 py-1.5 rounded-xl border border-slate-200/70 dark:border-slate-800/70 bg-slate-50/70 dark:bg-slate-800/50 text-slate-600 dark:text-slate-300 font-mono tabular-nums text-[11px]">
+            <div
+              title="系统统一使用北京时间 (Asia/Shanghai)"
+              className="hidden lg:flex shrink-0 items-center gap-1.5 px-2.5 py-1.5 rounded-xl border border-slate-200/70 dark:border-slate-800/70 bg-slate-50/70 dark:bg-slate-800/50 text-slate-600 dark:text-slate-300 font-mono tabular-nums text-[11px]"
+            >
               <Clock className="w-3.5 h-3.5 text-orange-500 animate-spin-slow" />
               <span>{currentTimeStr}</span>
             </div>

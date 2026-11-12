@@ -62,10 +62,18 @@ impl CheckCookieResult {
             Self::Expired(_) => "SESSION_EXPIRED: 登录会话已失效，已停止账号任务",
             Self::NeedVerify(_) => "SESSION_VERIFY_REQUIRED: 当前会话需要安全验证，已停止账号任务",
             Self::NetworkError(message) => match message.split(':').next() {
-                Some("SESSION_LIMITED") => "SESSION_LIMITED: 当前会话被限流，登录态未确认；未自动重试",
-                Some("SESSION_PROTOCOL") => "SESSION_PROTOCOL: 响应协议异常，登录态未确认；未自动重试",
-                Some("SESSION_BUSINESS") => "SESSION_BUSINESS: 业务响应未成功，登录态未确认；未自动重试",
-                Some("SESSION_NETWORK") => "SESSION_NETWORK: 网络请求未完成，登录态未确认；未自动重试",
+                Some("SESSION_LIMITED") => {
+                    "SESSION_LIMITED: 当前会话被限流，登录态未确认；未自动重试"
+                }
+                Some("SESSION_PROTOCOL") => {
+                    "SESSION_PROTOCOL: 响应协议异常，登录态未确认；未自动重试"
+                }
+                Some("SESSION_BUSINESS") => {
+                    "SESSION_BUSINESS: 业务响应未成功，登录态未确认；未自动重试"
+                }
+                Some("SESSION_NETWORK") => {
+                    "SESSION_NETWORK: 网络请求未完成，登录态未确认；未自动重试"
+                }
                 _ => "SESSION_UNCONFIRMED: 登录态检测未完成；未自动重试",
             },
         }
@@ -75,18 +83,81 @@ impl CheckCookieResult {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SendSparkResult {
     pub success: bool,
+    #[serde(default)]
+    pub state: SendSparkState,
     pub message: String,
     pub spark_days: Option<i32>,
     pub raw_response: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum SendSparkState {
+    Accepted,
+    Pending,
+    Rejected,
+    #[default]
+    Unknown,
+}
+
 impl SendSparkResult {
     pub fn failure(message: &str) -> Self {
-        Self { success: false, message: message.to_string(), spark_days: None, raw_response: None }
+        Self {
+            success: false,
+            state: SendSparkState::Rejected,
+            message: message.to_string(),
+            spark_days: None,
+            raw_response: None,
+        }
+    }
+
+    pub fn unknown(message: &str) -> Self {
+        Self {
+            success: false,
+            state: SendSparkState::Unknown,
+            message: message.to_string(),
+            spark_days: None,
+            raw_response: None,
+        }
+    }
+
+    pub fn pending(message: &str, raw_response: Option<String>) -> Self {
+        Self {
+            success: false,
+            state: SendSparkState::Pending,
+            message: message.to_string(),
+            spark_days: None,
+            raw_response,
+        }
+    }
+
+    pub fn accepted(
+        message: String,
+        spark_days: Option<i32>,
+        raw_response: Option<String>,
+    ) -> Self {
+        Self {
+            success: true,
+            state: SendSparkState::Accepted,
+            message,
+            spark_days,
+            raw_response,
+        }
+    }
+
+    pub fn is_pending(&self) -> bool {
+        self.state == SendSparkState::Pending
+    }
+
+    pub fn is_accepted(&self) -> bool {
+        self.success && self.state == SendSparkState::Accepted
     }
 
     pub fn is_fatal_failure(&self) -> bool {
-        !self.success && super::client::is_fatal_send_error(-1, &self.message)
+        matches!(
+            self.state,
+            SendSparkState::Rejected | SendSparkState::Unknown
+        ) && super::client::is_fatal_send_error(-1, &self.message)
     }
 }
 
@@ -102,12 +173,26 @@ mod diagnostic_tests {
     use super::*;
     #[test]
     fn diagnostic_is_fixed_and_does_not_echo_sensitive_details() {
-        for code in ["SESSION_LIMITED","SESSION_PROTOCOL","SESSION_BUSINESS","SESSION_NETWORK","SESSION_UNCONFIRMED"] {
-            let result=CheckCookieResult::NetworkError(format!("{code}: public-fixture-secret"));
+        for code in [
+            "SESSION_LIMITED",
+            "SESSION_PROTOCOL",
+            "SESSION_BUSINESS",
+            "SESSION_NETWORK",
+            "SESSION_UNCONFIRMED",
+        ] {
+            let result = CheckCookieResult::NetworkError(format!("{code}: public-fixture-secret"));
             assert!(result.safe_diagnostic().starts_with(code));
             assert!(!result.safe_diagnostic().contains("public-fixture-secret"));
         }
-        assert!(CheckCookieResult::NetworkError("arbitrary public fixture".into()).safe_diagnostic().starts_with("SESSION_UNCONFIRMED"));
-        assert!(CheckCookieResult::Expired("public fixture".into()).safe_diagnostic().starts_with("SESSION_EXPIRED"));
+        assert!(
+            CheckCookieResult::NetworkError("arbitrary public fixture".into())
+                .safe_diagnostic()
+                .starts_with("SESSION_UNCONFIRMED")
+        );
+        assert!(
+            CheckCookieResult::Expired("public fixture".into())
+                .safe_diagnostic()
+                .starts_with("SESSION_EXPIRED")
+        );
     }
 }

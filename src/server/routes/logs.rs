@@ -1,8 +1,8 @@
 use axum::{
+    Json,
     extract::{Query, State},
     http::StatusCode,
     response::IntoResponse,
-    Json,
 };
 use serde::Deserialize;
 use serde_json::json;
@@ -26,11 +26,23 @@ pub async fn list_logs(
     let account_id = query.account_id.as_deref().filter(|s| !s.trim().is_empty());
     let status = query.status.as_deref().filter(|s| !s.trim().is_empty());
 
-    let logs = db::list_logs(&state.pool, limit, offset, account_id, status).await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"code": 500, "message": e.to_string()}))))?;
+    let logs = db::list_logs(&state.pool, limit, offset, account_id, status)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"code": 500, "message": e.to_string()})),
+            )
+        })?;
 
-    let total = db::count_logs(&state.pool, account_id, status).await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"code": 500, "message": e.to_string()}))))?;
+    let total = db::count_logs(&state.pool, account_id, status)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"code": 500, "message": e.to_string()})),
+            )
+        })?;
 
     Ok(Json(json!({
         "code": 200,

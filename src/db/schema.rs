@@ -82,6 +82,22 @@ pub async fn init_schema(pool: &SqlitePool) -> Result<()> {
         FOREIGN KEY (account_id) REFERENCES accounts (id) ON DELETE CASCADE
     );
 
+    -- 抖音 App 原生登录会话。Cookie、d_ticket、Token 与设备参数整体加密保存。
+    CREATE TABLE IF NOT EXISTS account_native_sessions (
+        account_id TEXT PRIMARY KEY,
+        encrypted_session BLOB NOT NULL,
+        logged_in_at TEXT NOT NULL,
+        last_checked_at TEXT,
+        FOREIGN KEY (account_id) REFERENCES accounts (id) ON DELETE CASCADE
+    );
+
+    -- 账号独占设备指纹。一个账号一行，永不跨账号共享。
+    CREATE TABLE IF NOT EXISTS account_device_profiles (
+        account_id TEXT PRIMARY KEY,
+        encrypted_profile BLOB NOT NULL,
+        FOREIGN KEY (account_id) REFERENCES accounts (id) ON DELETE CASCADE
+    );
+
     CREATE TABLE IF NOT EXISTS im_send_attempts (
         account_id TEXT NOT NULL,
         conversation_id TEXT NOT NULL,
@@ -110,23 +126,25 @@ pub async fn init_schema(pool: &SqlitePool) -> Result<()> {
         .execute(pool)
         .await;
     // Safe migration: add conversation_type column if not exists
-    let _ = sqlx::query("ALTER TABLE spark_targets ADD COLUMN conversation_type INTEGER DEFAULT 1;")
-        .execute(pool)
-        .await;
+    let _ =
+        sqlx::query("ALTER TABLE spark_targets ADD COLUMN conversation_type INTEGER DEFAULT 1;")
+            .execute(pool)
+            .await;
     // Safe migration: add remark_name column if not exists
     let _ = sqlx::query("ALTER TABLE spark_targets ADD COLUMN remark_name TEXT;")
         .execute(pool)
         .await;
     // 不回填旧布尔值的日期：旧记录没有足够的“今日已发”证据。
-    let columns = sqlx::query_scalar::<_, String>("SELECT name FROM pragma_table_info('spark_targets')")
-        .fetch_all(pool).await?;
+    let columns =
+        sqlx::query_scalar::<_, String>("SELECT name FROM pragma_table_info('spark_targets')")
+            .fetch_all(pool)
+            .await?;
     if !columns.iter().any(|name| name == "today_checked_at") {
         sqlx::query("ALTER TABLE spark_targets ADD COLUMN today_checked_at TEXT")
-            .execute(pool).await.context("failed to add today_checked_at")?;
+            .execute(pool)
+            .await
+            .context("failed to add today_checked_at")?;
     }
-
-
-
 
     Ok(())
 }

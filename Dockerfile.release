@@ -1,0 +1,33 @@
+FROM alpine:latest
+ARG TARGETARCH
+WORKDIR /app
+
+LABEL org.opencontainers.image.source="https://github.com/aurorax-neo/SparkLight"
+LABEL org.opencontainers.image.description="SparkLight: Douyin multi-account isolation and daily spark keeper"
+
+RUN apk add --no-cache ca-certificates tzdata curl tini && \
+    ln -snf /usr/share/zoneinfo/Asia/Shanghai /etc/localtime && \
+    echo "Asia/Shanghai" > /etc/timezone && \
+    addgroup -g 10001 -S sparklight && \
+    adduser -u 10001 -S -G sparklight -h /app sparklight
+
+COPY docker-bin/${TARGETARCH}/sparklight /usr/local/bin/sparklight
+COPY docker-bin/${TARGETARCH}/native_session_import /usr/local/bin/native_session_import
+COPY frontend/dist /app/frontend/dist
+
+RUN chmod +x /usr/local/bin/sparklight /usr/local/bin/native_session_import && \
+    mkdir -p /data && \
+    chown -R sparklight:sparklight /data /app
+
+USER sparklight
+ENV TZ=Asia/Shanghai \
+    SPARK_HOST=0.0.0.0 \
+    SPARK_PORT=8080 \
+    SPARK_DATA_DIR=/data \
+    RUST_LOG=info
+EXPOSE 8080
+VOLUME ["/data"]
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+    CMD curl -fsS -o /dev/null http://127.0.0.1:8080/api/v1/system/health || exit 1
+ENTRYPOINT ["/sbin/tini", "--"]
+CMD ["sparklight"]

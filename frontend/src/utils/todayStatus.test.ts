@@ -13,6 +13,7 @@ const cases: [string, Partial<SparkTarget>, string][] = [
   ['未来日期', { today_checked_at: '2026-10-14T16:00:02Z' }, 'UNKNOWN'],
   ['系统昨天成功', { last_status: 'SUCCESS', last_sent_at: '2026-10-14T15:59:59Z' }, 'UNKNOWN'],
   ['系统今天成功', { last_status: 'SUCCESS', last_sent_at: now.toISOString() }, 'SUCCESS'],
+  ['系统今天已提交待确认', { last_status: 'PENDING', last_sent_at: now.toISOString() }, 'PENDING'],
   ['系统今天失败', { last_status: 'FAILED', last_sent_at: now.toISOString() }, 'FAILED'],
   ['失败不能掩盖当天已发', { last_status: 'FAILED', last_sent_at: now.toISOString(), today_checked_at: now.toISOString() }, 'SUCCESS'],
 ];

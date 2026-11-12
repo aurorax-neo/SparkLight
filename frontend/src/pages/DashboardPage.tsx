@@ -14,6 +14,7 @@ import { api } from '../api/client';
 import { AccountDto, SparkLog, SystemOverview } from '../types';
 import { TabType } from '../components/Navbar';
 import { accountDisplayName } from '../utils/displayName';
+import { formatBeijingDateTime, formatBeijingShortDateTime } from '../utils/datetime';
 
 interface Props {
   active?: boolean;
@@ -98,7 +99,7 @@ export const DashboardPage: React.FC<Props> = ({ active = true, onNavigate, refr
     {
       title: '定时调度策略',
       value: overview?.next_schedule_time ?? '09:30',
-      sub: '每日自动全量执行',
+      sub: '每日自动执行 (UTC+8)',
       icon: Clock,
       color: 'from-emerald-500 to-teal-600',
       actionTab: 'settings' as TabType,
@@ -106,7 +107,7 @@ export const DashboardPage: React.FC<Props> = ({ active = true, onNavigate, refr
   ];
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-4">
       {/* Header bar */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
@@ -158,7 +159,7 @@ export const DashboardPage: React.FC<Props> = ({ active = true, onNavigate, refr
       </div>
 
       {/* Main Split Section */}
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
         {/* Account Status Quick View */}
         <div className="lg:col-span-2 rounded-2xl bg-white dark:bg-slate-900 p-5 border border-slate-200/80 dark:border-slate-800/80 shadow-sm">
           <div className="flex items-center justify-between mb-4">
@@ -186,8 +187,8 @@ export const DashboardPage: React.FC<Props> = ({ active = true, onNavigate, refr
               </button>
             </div>
           ) : (
-            <div className="space-y-2.5">
-              {accounts.slice(0, 4).map((acc) => {
+            <div className="grid grid-cols-1 xl:grid-cols-2 gap-3">
+              {accounts.slice(0, 6).map((acc) => {
                 const isValid = acc.status === 'ACTIVE';
                 return (
                   <div
@@ -208,8 +209,8 @@ export const DashboardPage: React.FC<Props> = ({ active = true, onNavigate, refr
                             {accountDisplayName(acc.nickname, acc.alias)}
                           </span>
                         </div>
-                        <p className="text-[10px] text-slate-400 font-mono mt-0.5 truncate">
-                          {acc.masked_cookie ? acc.masked_cookie.slice(0, 32) + '...' : '未配置Cookie'}
+                        <p className={`text-[10px] mt-0.5 truncate ${acc.native_ready ? 'text-emerald-500' : 'text-amber-500'}`}>
+                          {acc.native_ready ? 'App 原生会话' : '原生会话待补齐'}
                         </p>
                       </div>
                     </div>
@@ -257,6 +258,7 @@ export const DashboardPage: React.FC<Props> = ({ active = true, onNavigate, refr
               <div className="space-y-3">
                 {recentLogs.map((log) => {
                   const isSuccess = log.status === 'SUCCESS';
+                  const isPending = log.status === 'PENDING';
                   return (
                     <div key={log.id} className="text-xs border-b border-slate-100 dark:border-slate-800/60 pb-2.5 last:border-0">
                       <div className="flex items-center justify-between">
@@ -267,17 +269,22 @@ export const DashboardPage: React.FC<Props> = ({ active = true, onNavigate, refr
                           className={`text-[10px] px-1.5 py-0.5 rounded font-medium ${
                             isSuccess
                               ? 'bg-emerald-100 dark:bg-emerald-900/30 text-emerald-600 dark:text-emerald-400'
+                              : isPending
+                                ? 'bg-sky-100 dark:bg-sky-900/30 text-sky-600 dark:text-sky-400'
                               : 'bg-rose-100 dark:bg-rose-900/30 text-rose-600 dark:text-rose-400'
                           }`}
                         >
-                          {isSuccess ? '成功' : '失败'}
+                          {isSuccess ? '成功' : isPending ? '待确认' : '失败'}
                         </span>
                       </div>
                       <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-1 truncate">
                         {log.message}
                       </p>
-                      <span className="text-[10px] text-slate-400 font-mono mt-0.5 block">
-                        {log.created_at ? new Date(log.created_at).toLocaleTimeString() : ''}
+                      <span
+                        title={log.created_at ? `${formatBeijingDateTime(log.created_at)} (UTC+8)` : ''}
+                        className="text-[10px] text-slate-400 font-mono mt-0.5 block"
+                      >
+                        {log.created_at ? formatBeijingShortDateTime(log.created_at) : ''}
                       </span>
                     </div>
                   );

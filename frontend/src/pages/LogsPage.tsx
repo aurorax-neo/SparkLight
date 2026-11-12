@@ -14,6 +14,7 @@ import { api } from '../api/client';
 import { AccountDto, SparkLog } from '../types';
 import { CustomSelect } from '../components/ui/CustomSelect';
 import { useToast } from '../components/ui/Toast';
+import { formatBeijingDateTime } from '../utils/datetime';
 
 interface Props {
   refreshTrigger: number;
@@ -81,6 +82,7 @@ export const LogsPage: React.FC<Props> = ({ active = true, refreshTrigger }) => 
   const statusOptions = [
     { value: '', label: '全部状态' },
     { value: 'SUCCESS', label: '仅成功' },
+    { value: 'PENDING', label: '仅待确认' },
     { value: 'FAILED', label: '仅失败' },
   ];
 
@@ -93,7 +95,7 @@ export const LogsPage: React.FC<Props> = ({ active = true, refreshTrigger }) => 
             运行流水日志
           </h1>
           <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
-            全量记录 Cookie 巡检、安全风控拦截与续火花互动记录
+            全量记录登录态巡检、安全风控拦截与续火花互动记录
           </p>
         </div>
 
@@ -163,17 +165,18 @@ export const LogsPage: React.FC<Props> = ({ active = true, refreshTrigger }) => 
             <tbody className="divide-y divide-slate-100 dark:divide-slate-800/60 font-sans">
               {logs.map((log) => {
                 const isSuccess = log.status === 'SUCCESS';
+                const isPending = log.status === 'PENDING';
                 const isCheck = log.action_type !== 'SEND_SPARK' && log.action_type !== 'TEST_SPARK';
                 const actionLabel: Record<string, string> = {
                   CHECK_COOKIE: '凭证检测', ACCOUNT_EXECUTION: '账号执行',
-                  REFRESH_COOKIE: 'Cookie 更新', SEND_SPARK: '续火花互动',
+                  REFRESH_COOKIE: '会话轮转', SEND_SPARK: '续火花互动',
                   TEST_SPARK: '单次互动', PRE_SEND_CHECK: '发送前检查', POST_SEND_CHECK: '发送后检查',
                 };
 
                 return (
                   <tr key={log.id} className="hover:bg-slate-50/50 dark:hover:bg-slate-800/30 transition">
                     <td className="py-3 px-4 text-slate-500 dark:text-slate-400 font-mono text-[11px] whitespace-nowrap">
-                      {new Date(log.created_at).toLocaleString()}
+                      {formatBeijingDateTime(log.created_at)}
                     </td>
                     <td className="py-3 px-4 font-semibold text-slate-800 dark:text-slate-200">
                       {log.account_alias}
@@ -198,14 +201,16 @@ export const LogsPage: React.FC<Props> = ({ active = true, refreshTrigger }) => 
                         className={`inline-flex items-center gap-1 font-semibold text-[11px] ${
                           isSuccess
                             ? 'text-emerald-600 dark:text-emerald-400'
-                            : 'text-rose-600 dark:text-rose-400'
+                            : isPending
+                              ? 'text-sky-600 dark:text-sky-400'
+                              : 'text-rose-600 dark:text-rose-400'
                         }`}
                       >
-                        {isSuccess ? <CheckCircle2 className="w-3.5 h-3.5" /> : <AlertTriangle className="w-3.5 h-3.5" />}
-                        {isSuccess ? '成功' : '失败'}
+                        {isSuccess ? <CheckCircle2 className="w-3.5 h-3.5" /> : isPending ? <RefreshCw className="w-3.5 h-3.5" /> : <AlertTriangle className="w-3.5 h-3.5" />}
+                        {isSuccess ? '成功' : isPending ? '待确认' : '失败'}
                       </span>
                     </td>
-                    <td className="py-3 px-4 text-slate-700 dark:text-slate-300 max-w-xs sm:max-w-sm xl:max-w-md break-words">
+                    <td className="py-3 px-4 text-slate-700 dark:text-slate-300 break-words">
                       {log.message}
                     </td>
                   </tr>

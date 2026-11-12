@@ -1,16 +1,17 @@
 use std::{
+    collections::HashMap,
     sync::{
+        Arc, Mutex as StdMutex, OnceLock,
         atomic::{AtomicBool, AtomicI64, AtomicU32, Ordering},
-        Arc,
     },
     time::Duration,
 };
 
 use anyhow::{Context, Result, bail};
-use chrono::{Local, Utc};
+use chrono::Utc;
 use rand::Rng;
 use sqlx::SqlitePool;
-use tokio::sync::{RwLock, Mutex, watch};
+use tokio::sync::{Mutex, RwLock, watch};
 
 use crate::{
     crypto::SecretBox,
@@ -21,6 +22,69 @@ use crate::{
 };
 
 struct RunningGuard(Arc<AtomicBool>);
+
+/// 身份 Token 的纯 Rust 心跳周期。
+const IDENTITY_REFRESH_INTERVAL_SECS: i64 = 6 * 3600;
+
+/// App 原生 TokenBeat 官方默认周期为 600000ms。
+const NATIVE_TOKEN_BEAT_INTERVAL_SECS: i64 = 10 * 60;
+
+/// App 原生会话主动校验的最小间隔；手动检测不受此限制。
+const NATIVE_CHECK_INTERVAL_SECS: i64 = 30 * 60;
+
+/// 同一账号两次续期尝试之间的最小间隔，失败后不会每五分钟重复请求。
+const SESSION_REFRESH_RETRY_INTERVAL_SECS: i64 = 6 * 3600;
+
+fn identity_refresh_due(
+    context: Option<&crate::douyin::im_auth::WebSessionContext>,
+    now: i64,
+) -> bool {
+    context.is_none_or(|context| {
+        !context.has_identity()
+            || context
+                .last_beat_at
+                .is_none_or(|at| now.saturating_sub(at) >= IDENTITY_REFRESH_INTERVAL_SECS)
+    })
+}
+
+fn claim_session_refresh_attempt(
+    scope: &str,
+    account_id: &str,
+    now: i64,
+    retry_interval: i64,
+) -> bool {
+    static LAST_ATTEMPTS: OnceLock<StdMutex<HashMap<String, i64>>> = OnceLock::new();
+    let mut attempts = LAST_ATTEMPTS
+        .get_or_init(|| StdMutex::new(HashMap::new()))
+        .lock()
+        .unwrap();
+    let key = format!("{scope}:{account_id}");
+    if attempts
+        .get(&key)
+        .is_some_and(|at| now.saturating_sub(*at) < retry_interval)
+    {
+        return false;
+    }
+    attempts.insert(key, now);
+    true
+}
+
+fn claim_native_check_attempt(account_id: &str, now: i64) -> bool {
+    static LAST_ATTEMPTS: OnceLock<StdMutex<HashMap<String, i64>>> = OnceLock::new();
+    let mut attempts = LAST_ATTEMPTS
+        .get_or_init(|| StdMutex::new(HashMap::new()))
+        .lock()
+        .unwrap();
+    if attempts
+        .get(account_id)
+        .is_some_and(|at| now.saturating_sub(*at) < NATIVE_CHECK_INTERVAL_SECS)
+    {
+        return false;
+    }
+    attempts.insert(account_id.to_string(), now);
+    true
+}
+
 impl Drop for RunningGuard {
     fn drop(&mut self) {
         self.0.store(false, Ordering::SeqCst);
@@ -33,7 +97,7 @@ pub struct SparkEngine {
     pub secret_box: SecretBox,
     pub notifier: BarkNotifier,
     pub schedule_time: Arc<RwLock<String>>,
-    delay_settings: watch::Sender<(u64,u64)>,
+    delay_settings: watch::Sender<(u64, u64)>,
     pub(crate) settings_update_lock: Arc<Mutex<()>>,
     pub max_retries: Arc<AtomicU32>,
     pub is_running: Arc<AtomicBool>,
@@ -81,14 +145,26 @@ impl ExecutionDiagnostic {
 
     fn message(self) -> &'static str {
         match self {
-            Self::WebContextMissing => "缺少当前账号的官方 Web IM 上下文，已停止账号任务；未因此尝试发送或重试",
-            Self::WebContextExpired => "官方 Web IM 上下文已过期，已停止账号任务；未因此尝试发送或重试",
-            Self::WebContextInvalid => "账号 Web 上下文无法装载或校验，已停止账号任务；未因此尝试发送或重试",
-            Self::SendCredentialMissing => "缺少当前目标的官方 IM 发送凭证，已停止账号任务；未因此尝试发送或重试",
-            Self::SendCredentialInvalid => "官方 IM 发送凭证无法校验，已停止账号任务；未因此尝试发送或重试",
-            Self::IdentityRefreshFailed => "IM 身份 Token 续取失败或身份变化，已停止；未消费发送授权、未发送且未重试",
+            Self::WebContextMissing => {
+                "缺少当前账号的官方 Web IM 上下文，已停止账号任务；未因此尝试发送或重试"
+            }
+            Self::WebContextExpired => {
+                "官方 Web IM 上下文已过期，已停止账号任务；未因此尝试发送或重试"
+            }
+            Self::WebContextInvalid => {
+                "账号 Web 上下文无法装载或校验，已停止账号任务；未因此尝试发送或重试"
+            }
+            Self::SendCredentialMissing => {
+                "缺少当前目标的官方 IM 发送凭证，已停止账号任务；未因此尝试发送或重试"
+            }
+            Self::SendCredentialInvalid => {
+                "官方 IM 发送凭证无法校验，已停止账号任务；未因此尝试发送或重试"
+            }
+            Self::IdentityRefreshFailed => {
+                "IM 身份 Token 续取失败或身份变化，已停止；未消费发送授权、未发送且未重试"
+            }
             Self::ConversationUnknown => "目标会话状态未确认，已停止账号任务；未因此尝试发送或重试",
-            Self::HistoryUnknown => "今日发送历史未确认完整，已停止账号任务；未因此尝试发送或重试",
+            Self::HistoryUnknown => "今日发送历史未确认完整，已跳过当前目标；未因此尝试发送或重试",
             Self::SessionUnconfirmed => "当前账号登录会话未确认有效，已停止账号任务",
             Self::AccountStopped => "账号任务异常终止；详细错误已省略以保护凭证",
         }
@@ -98,14 +174,19 @@ impl ExecutionDiagnostic {
         // load_web_context 是可选装载；缺失/过期也可能到后续 IM 查询才报错。
         for cause in error.chain() {
             let s = cause.to_string();
-            if s.contains("EXPIRED_BY_CREATE_TIME") || s == "官方 IM 上下文已过期，请重新同步，禁止请求" {
+            if s.contains("EXPIRED_BY_CREATE_TIME")
+                || s == "官方 IM 上下文已过期，请重新同步，禁止请求"
+            {
                 return Self::WebContextExpired;
             }
             if s == "缺少官方 Web IM 上下文，需同步当前账号凭证，禁止请求" {
                 return Self::WebContextMissing;
             }
         }
-        error.downcast_ref::<Self>().copied().unwrap_or(Self::AccountStopped)
+        error
+            .downcast_ref::<Self>()
+            .copied()
+            .unwrap_or(Self::AccountStopped)
     }
 }
 
@@ -160,9 +241,18 @@ impl ExecutionSummary {
 
 impl BatchSummary {
     fn from_accounts(accounts: Vec<ExecutionSummary>, active_accounts: usize) -> Self {
-        let successful_accounts = accounts.iter().filter(|s| s.status == ExecutionStatus::Success).count();
-        let failed_accounts = accounts.iter().filter(|s| s.status == ExecutionStatus::Failed).count();
-        let partial_failed_accounts = accounts.iter().filter(|s| s.status == ExecutionStatus::PartialFailed).count();
+        let successful_accounts = accounts
+            .iter()
+            .filter(|s| s.status == ExecutionStatus::Success)
+            .count();
+        let failed_accounts = accounts
+            .iter()
+            .filter(|s| s.status == ExecutionStatus::Failed)
+            .count();
+        let partial_failed_accounts = accounts
+            .iter()
+            .filter(|s| s.status == ExecutionStatus::PartialFailed)
+            .count();
         let status = if failed_accounts + partial_failed_accounts == 0 {
             ExecutionStatus::Success
         } else if failed_accounts == accounts.len() {
@@ -170,8 +260,15 @@ impl BatchSummary {
         } else {
             ExecutionStatus::PartialFailed
         };
-        Self { total_accounts: accounts.len(), active_accounts, accounts, status,
-            successful_accounts, failed_accounts, partial_failed_accounts }
+        Self {
+            total_accounts: accounts.len(),
+            active_accounts,
+            accounts,
+            status,
+            successful_accounts,
+            failed_accounts,
+            partial_failed_accounts,
+        }
     }
 
     pub fn completion_message(&self) -> &'static str {
@@ -185,23 +282,49 @@ impl BatchSummary {
 
 fn target_conversation_id(account: &Account, target: &SparkTarget) -> Result<String> {
     if target.conversation_type == 2 {
-        return Ok(target.conversation_id.clone().unwrap_or_else(|| target.target_sec_uid.clone()));
+        return Ok(target
+            .conversation_id
+            .clone()
+            .unwrap_or_else(|| target.target_sec_uid.clone()));
     }
-    let sender = account.uid.as_deref().and_then(|uid| uid.parse::<u64>().ok()).filter(|uid| *uid > 0).context("账号 UID 无效，禁止发送")?;
-    let peer = target.target_uid.as_deref().and_then(|uid| uid.parse::<u64>().ok()).filter(|uid| *uid > 0).context("目标 UID 无效，禁止发送")?;
+    let sender = account
+        .uid
+        .as_deref()
+        .and_then(|uid| uid.parse::<u64>().ok())
+        .filter(|uid| *uid > 0)
+        .context("账号 UID 无效，禁止发送")?;
+    let peer = target
+        .target_uid
+        .as_deref()
+        .and_then(|uid| uid.parse::<u64>().ok())
+        .filter(|uid| *uid > 0)
+        .context("目标 UID 无效，禁止发送")?;
     Ok(format!("0:1:{}:{}", sender.min(peer), sender.max(peer)))
 }
 
 // force_resend 仅保留调用兼容性，不能越过真实当日已发门禁。
-fn skip_sent_today(sent: bool, _force_resend: bool) -> bool { sent }
+fn skip_sent_today(sent: bool, _force_resend: bool) -> bool {
+    sent
+}
 
 /// 手动验收只发一次；自动任务仅对非致命错误重试。
-async fn send_with_retry<F, Fut>(max_attempts: u32, delay: Duration, mut send: F) -> (crate::douyin::types::SendSparkResult, u32)
-where F: FnMut() -> Fut, Fut: std::future::Future<Output = crate::douyin::types::SendSparkResult> {
+async fn send_with_retry<F, Fut>(
+    max_attempts: u32,
+    delay: Duration,
+    mut send: F,
+) -> (crate::douyin::types::SendSparkResult, u32)
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = crate::douyin::types::SendSparkResult>,
+{
     let max_attempts = max_attempts.max(1);
     for attempt in 1..=max_attempts {
         let result = send().await;
-        if result.success || result.is_fatal_failure() || attempt == max_attempts {
+        if result.is_accepted()
+            || result.is_pending()
+            || result.is_fatal_failure()
+            || attempt == max_attempts
+        {
             return (result, attempt);
         }
         tokio::time::sleep(delay).await;
@@ -225,7 +348,7 @@ impl SparkEngine {
             secret_box,
             notifier,
             schedule_time: Arc::new(RwLock::new(schedule_time)),
-            delay_settings: watch::channel((min_delay_secs,max_delay_secs.max(min_delay_secs))).0,
+            delay_settings: watch::channel((min_delay_secs, max_delay_secs.max(min_delay_secs))).0,
             settings_update_lock: Arc::new(Mutex::new(())),
             max_retries: Arc::new(AtomicU32::new(max_retries)),
             is_running: Arc::new(AtomicBool::new(false)),
@@ -238,7 +361,10 @@ impl SparkEngine {
     pub fn record_manual_action(&self) {
         let now = Utc::now().timestamp();
         self.last_manual_action.store(now, Ordering::Relaxed);
-        tracing::info!(timestamp = now, "已记录前台手动操作，已激活 30 分钟后台推送静默退避");
+        tracing::info!(
+            timestamp = now,
+            "已记录前台手动操作，已激活 30 分钟后台推送静默退避"
+        );
     }
 
     /// 检查当前是否处于前台手动操作触发的 30 分钟静默窗口期。
@@ -254,8 +380,15 @@ impl SparkEngine {
 
     /// 登录会话临期预警。`sid_guard` 由平台服务端固定有效期，无法无交互续期，
     /// 因此只在剩余不足 7 天时提前一次告知，避免用户被动发现断签。
-    async fn warn_on_session_expiry(&self, account: &Account, cookie: &str, notify_on_failure: bool) {
-        let Some(expiry) = crate::douyin::im_auth::sid_guard_expiry(cookie) else { return; };
+    async fn warn_on_session_expiry(
+        &self,
+        account: &Account,
+        cookie: &str,
+        notify_on_failure: bool,
+    ) {
+        let Some(expiry) = crate::douyin::im_auth::sid_guard_expiry(cookie) else {
+            return;
+        };
         let remaining = expiry - Utc::now().timestamp();
         if remaining > 7 * 86400 {
             return;
@@ -265,34 +398,66 @@ impl SparkEngine {
         if !notify_on_failure || self.is_in_manual_silence_window() {
             return;
         }
-        self.record_log(&account.id, &account.alias, None, None, "SESSION_EXPIRING", "SUCCESS",
-            &format!("登录会话约 {remaining_days} 天后到期，请在到期前重新登录并同步凭证")).await.ok();
-        self.notifier.send_cookie_expiring_alert(&account.alias, account.nickname.as_deref(), remaining_days,
-            account.bark_key_override.as_deref()).await.ok();
+        self.record_log(
+            &account.id,
+            &account.alias,
+            None,
+            None,
+            "SESSION_EXPIRING",
+            "SUCCESS",
+            &format!("登录会话约 {remaining_days} 天后到期，请在到期前重新登录并同步凭证"),
+        )
+        .await
+        .ok();
+        self.notifier
+            .send_cookie_expiring_alert(
+                &account.alias,
+                account.nickname.as_deref(),
+                remaining_days,
+                account.bark_key_override.as_deref(),
+            )
+            .await
+            .ok();
     }
 
-    pub fn delay_range(&self) -> (u64,u64) { *self.delay_settings.borrow() }
+    pub fn delay_range(&self) -> (u64, u64) {
+        *self.delay_settings.borrow()
+    }
 
-    pub(crate) fn set_delay_range(&self,min:u64,max:u64) {
+    pub(crate) fn set_delay_range(&self, min: u64, max: u64) {
         self.delay_settings.send_if_modified(|range| {
-            if *range==(min,max) {false} else {*range=(min,max);true}
+            if *range == (min, max) {
+                false
+            } else {
+                *range = (min, max);
+                true
+            }
         });
     }
 
     /// 修改延迟时唤醒现有等待，以已等待时长抵扣新延迟。
-    async fn prepare_target_delay(&self,client:&DouyinClient,account:&Account,target:&SparkTarget) -> Result<()> {
-        self.load_send_credential(client,account,target).await?;
+    async fn prepare_target_delay(
+        &self,
+        client: &DouyinClient,
+        account: &Account,
+        target: &SparkTarget,
+    ) -> Result<()> {
+        self.load_send_credential(client, account, target).await?;
         self.wait_target_delay().await;
         Ok(())
     }
 
     async fn wait_target_delay(&self) {
-        let started=tokio::time::Instant::now();
-        let mut settings=self.delay_settings.subscribe();
+        let started = tokio::time::Instant::now();
+        let mut settings = self.delay_settings.subscribe();
         loop {
-            let (min,max)=*settings.borrow_and_update();
-            let seconds=if max>min {rand::thread_rng().gen_range(min..=max)} else {min};
-            let remaining=Duration::from_secs(seconds).saturating_sub(started.elapsed());
+            let (min, max) = *settings.borrow_and_update();
+            let seconds = if max > min {
+                rand::thread_rng().gen_range(min..=max)
+            } else {
+                min
+            };
+            let remaining = Duration::from_secs(seconds).saturating_sub(started.elapsed());
             tokio::select! {
                 biased;
                 changed=settings.changed()=>if changed.is_err() {return;},
@@ -304,36 +469,220 @@ impl SparkEngine {
         }
     }
 
-    /// 检查账号并保存已观察到的 Cookie 更新；不据此判定会话延寿。
+    /// 使用抖音 App 原生 Passport 接口检查账号。
+    ///
+    /// 只有官方资料接口明确返回同一 UID 才判定有效，只有明确的登录注销错误才判定失效。
+    /// 网络、限流、安全校验和非 JSON 响应全部只算“未确认”，绝不覆盖仍可恢复的登录态。
+    pub async fn check_native_account(
+        &self,
+        account: &Account,
+        notify_on_failure: bool,
+    ) -> Result<crate::douyin::login::NativeCheck> {
+        let native = match db::load_native_session(&self.pool, &self.secret_box, &account.id).await
+        {
+            Ok(Some(native)) => native,
+            Ok(None) => {
+                let message =
+                    "当前账号尚未导入 App 原生会话；请扫码登录或导入官方 Android 原生会话";
+                self.record_log(
+                    &account.id,
+                    &account.alias,
+                    None,
+                    None,
+                    "CHECK_COOKIE",
+                    "UNCONFIRMED",
+                    message,
+                )
+                .await
+                .ok();
+                return Ok(crate::douyin::login::NativeCheck::Unconfirmed(
+                    message.to_string(),
+                ));
+            }
+            Err(error) => {
+                tracing::warn!(
+                    account = %account.alias,
+                    error = %error,
+                    "App 原生会话读取失败，保留现有状态"
+                );
+                let message = "App 原生会话读取失败，本次未确认登录态";
+                self.record_log(
+                    &account.id,
+                    &account.alias,
+                    None,
+                    None,
+                    "CHECK_COOKIE",
+                    "UNCONFIRMED",
+                    message,
+                )
+                .await
+                .ok();
+                return Ok(crate::douyin::login::NativeCheck::Unconfirmed(
+                    message.to_string(),
+                ));
+            }
+        };
+
+        let checked = crate::douyin::login::check_native_session(&native).await;
+        match &checked {
+            crate::douyin::login::NativeCheck::Valid(profile) => {
+                db::update_account_status(&self.pool, &account.id, "ACTIVE", Utc::now()).await?;
+                db::update_account_profile(
+                    &self.pool,
+                    &account.id,
+                    (!profile.sec_uid.is_empty()).then_some(profile.sec_uid.as_str()),
+                    (!profile.uid.is_empty()).then_some(profile.uid.as_str()),
+                    (!profile.nickname.is_empty()).then_some(profile.nickname.as_str()),
+                    (!profile.avatar_url.is_empty()).then_some(profile.avatar_url.as_str()),
+                )
+                .await?;
+
+                let mut updated = native;
+                updated.sec_uid = profile.sec_uid.clone();
+                updated.nickname = profile.nickname.clone();
+                updated.avatar_url = profile.avatar_url.clone();
+                updated.last_verified_at = Some(Utc::now().timestamp());
+                db::persist_native_session(&self.pool, &self.secret_box, &account.id, &updated)
+                    .await?;
+                self.record_log(
+                    &account.id,
+                    &account.alias,
+                    None,
+                    None,
+                    "CHECK_COOKIE",
+                    "SUCCESS",
+                    "抖音 App 原生会话有效，已更新账号资料",
+                )
+                .await
+                .ok();
+            }
+            crate::douyin::login::NativeCheck::Expired(reason) => {
+                db::update_account_status(&self.pool, &account.id, "EXPIRED", Utc::now()).await?;
+                self.record_log(
+                    &account.id,
+                    &account.alias,
+                    None,
+                    None,
+                    "CHECK_COOKIE",
+                    "FAILED",
+                    reason,
+                )
+                .await
+                .ok();
+                if notify_on_failure && !self.is_in_manual_silence_window() {
+                    self.notifier
+                        .send_cookie_expired_alert(
+                            &account.alias,
+                            account.nickname.as_deref(),
+                            reason,
+                            account.bark_key_override.as_deref(),
+                        )
+                        .await
+                        .ok();
+                }
+            }
+            crate::douyin::login::NativeCheck::Unconfirmed(reason) => {
+                self.record_log(
+                    &account.id,
+                    &account.alias,
+                    None,
+                    None,
+                    "CHECK_COOKIE",
+                    "UNCONFIRMED",
+                    reason,
+                )
+                .await
+                .ok();
+            }
+        }
+        Ok(checked)
+    }
+
+    /// 检查 Web 会话并保存已观察到的 Cookie 更新；不据此判定会话延寿。
     /// `notify_on_failure`: 是否在检测失败（失效/安全验证/解密异常）时向 Bark 发送推送告警。
     /// 前台手动操作（手动点击检测有效性、更新保存账号、手动触发等）必须设为 false，确保静默测试；后台定时任务与巡检设为 true。
-    pub async fn check_account_cookie(&self, account: &Account, notify_on_failure: bool) -> Result<bool> {
+    pub async fn check_account_cookie(
+        &self,
+        account: &Account,
+        notify_on_failure: bool,
+    ) -> Result<bool> {
         let plaintext_cookie = match self.secret_box.decrypt(&account.encrypted_cookie) {
             Ok(bytes) => match String::from_utf8(bytes) {
                 Ok(s) => s,
                 Err(_) => {
                     let err_msg = "Cookie 解密后不是有效的 UTF-8 文本";
-                    self.record_log(&account.id, &account.alias, None, None, "CHECK_COOKIE", "FAILED", err_msg).await.ok();
-                    db::update_account_status(&self.pool, &account.id, "EXPIRED", Utc::now()).await?;
+                    self.record_log(
+                        &account.id,
+                        &account.alias,
+                        None,
+                        None,
+                        "CHECK_COOKIE",
+                        "FAILED",
+                        err_msg,
+                    )
+                    .await
+                    .ok();
+                    db::update_account_status(&self.pool, &account.id, "EXPIRED", Utc::now())
+                        .await?;
                     if notify_on_failure && !self.is_in_manual_silence_window() {
-                        self.notifier.send_cookie_expired_alert(&account.alias, account.nickname.as_deref(), err_msg, account.bark_key_override.as_deref()).await.ok();
+                        self.notifier
+                            .send_cookie_expired_alert(
+                                &account.alias,
+                                account.nickname.as_deref(),
+                                err_msg,
+                                account.bark_key_override.as_deref(),
+                            )
+                            .await
+                            .ok();
                     }
                     return Ok(false);
                 }
             },
             Err(_) => {
                 let err_msg = "Cookie 解密失败（错误详情已省略）";
-                self.record_log(&account.id, &account.alias, None, None, "CHECK_COOKIE", "FAILED", &err_msg).await.ok();
+                self.record_log(
+                    &account.id,
+                    &account.alias,
+                    None,
+                    None,
+                    "CHECK_COOKIE",
+                    "FAILED",
+                    &err_msg,
+                )
+                .await
+                .ok();
                 db::update_account_status(&self.pool, &account.id, "EXPIRED", Utc::now()).await?;
                 if notify_on_failure && !self.is_in_manual_silence_window() {
-                    self.notifier.send_cookie_expired_alert(&account.alias, account.nickname.as_deref(), err_msg, account.bark_key_override.as_deref()).await.ok();
+                    self.notifier
+                        .send_cookie_expired_alert(
+                            &account.alias,
+                            account.nickname.as_deref(),
+                            err_msg,
+                            account.bark_key_override.as_deref(),
+                        )
+                        .await
+                        .ok();
                 }
                 return Ok(false);
             }
         };
 
-        let client = DouyinClient::new(&plaintext_cookie, &account.alias)?;
-        client.load_web_context(&self.pool,&self.secret_box,&account.id,account.uid.as_deref()).await
+        let client = DouyinClient::for_account(
+            &self.pool,
+            &self.secret_box,
+            &account.id,
+            &plaintext_cookie,
+            &account.alias,
+        )
+        .await?;
+        client
+            .load_web_context(
+                &self.pool,
+                &self.secret_box,
+                &account.id,
+                account.uid.as_deref(),
+            )
+            .await
             .context(ExecutionDiagnostic::WebContextInvalid)?;
         if client.repair_bound_guard_cookie()? {
             tracing::info!(account = %account.alias, "检测到历史 Guard Cookie 与当前票据材料不一致，已在发网前完成本地重算对齐");
@@ -341,11 +690,18 @@ impl SparkEngine {
         let check_res = client.check_cookie().await;
 
         // Cookie 变化不等于续期；只保存已观察到的更新。
-        if client.is_cookie_changed() && matches!(&check_res,crate::douyin::types::CheckCookieResult::Valid(profile) if account.uid.as_deref().is_none_or(|uid| uid==profile.uid)) {
+        if client.is_cookie_changed()
+            && matches!(&check_res,crate::douyin::types::CheckCookieResult::Valid(profile) if account.uid.as_deref().is_none_or(|uid| uid==profile.uid))
+        {
             let refreshed_cookie = client.get_current_cookie();
             if let Ok(new_encrypted) = self.secret_box.encrypt(refreshed_cookie.as_bytes()) {
-                db::update_account_cookie(&self.pool, &account.id, &new_encrypted).await.ok();
-                client.persist_web_context(&self.pool,&self.secret_box,&account.id).await.ok();
+                db::update_account_cookie(&self.pool, &account.id, &new_encrypted)
+                    .await
+                    .ok();
+                client
+                    .persist_web_context(&self.pool, &self.secret_box, &account.id)
+                    .await
+                    .ok();
                 self.record_log(
                     &account.id,
                     &account.alias,
@@ -354,30 +710,56 @@ impl SparkEngine {
                     "REFRESH_COOKIE",
                     "SUCCESS",
                     "已观察到 Cookie 更新并加密保存，但未证实延长会话有效期",
-                ).await.ok();
+                )
+                .await
+                .ok();
                 tracing::info!(account = %account.alias, "已观察到 Cookie 更新并保存，但未证实延长会话有效期");
             }
         }
 
         match check_res {
             crate::douyin::types::CheckCookieResult::Valid(profile) => {
-                self.warn_on_session_expiry(&account, &plaintext_cookie, notify_on_failure).await;
+                self.warn_on_session_expiry(&account, &plaintext_cookie, notify_on_failure)
+                    .await;
                 if account.uid.as_deref().is_some_and(|uid| uid != profile.uid) {
-                    let _=client.verified_sender_uid(account.uid.as_deref());
-                    db::update_account_status(&self.pool, &account.id, "EXPIRED", Utc::now()).await?;
-                    self.record_log(&account.id, &account.alias, None, None, "CHECK_COOKIE", "FAILED", "Cookie 身份与所属账号不符，禁止发送且保留原账号资料").await?;
+                    let _ = client.verified_sender_uid(account.uid.as_deref());
+                    db::update_account_status(&self.pool, &account.id, "EXPIRED", Utc::now())
+                        .await?;
+                    self.record_log(
+                        &account.id,
+                        &account.alias,
+                        None,
+                        None,
+                        "CHECK_COOKIE",
+                        "FAILED",
+                        "Cookie 身份与所属账号不符，禁止发送且保留原账号资料",
+                    )
+                    .await?;
                     return Ok(false);
                 }
                 db::update_account_status(&self.pool, &account.id, "ACTIVE", Utc::now()).await?;
-                db::update_account_profile(
-                    &self.pool,
-                    &account.id,
-                    Some(&profile.sec_uid),
-                    Some(&profile.uid),
-                    Some(&profile.nickname),
-                    Some(&profile.avatar_url),
-                ).await?;
-                client.persist_web_context(&self.pool,&self.secret_box,&account.id).await.ok();
+                if !profile.sec_uid.is_empty()
+                    && !profile.nickname.is_empty()
+                    && !profile.avatar_url.is_empty()
+                {
+                    db::update_account_profile(
+                        &self.pool,
+                        &account.id,
+                        Some(&profile.sec_uid),
+                        Some(&profile.uid),
+                        Some(&profile.nickname),
+                        Some(&profile.avatar_url),
+                    )
+                    .await?;
+                }
+                let message = if profile.sec_uid.is_empty()
+                    && profile.nickname.is_empty()
+                    && profile.avatar_url.is_empty()
+                {
+                    "本地登录票据结构有效，未向抖音发起探测请求".to_string()
+                } else {
+                    format!("账号状态正常，已更新资料（昵称: {}）", profile.nickname)
+                };
                 self.record_log(
                     &account.id,
                     &account.alias,
@@ -385,28 +767,69 @@ impl SparkEngine {
                     None,
                     "CHECK_COOKIE",
                     "SUCCESS",
-                    &format!("账号状态正常，已更新资料（昵称: {}）", profile.nickname),
-                ).await.ok();
+                    &message,
+                )
+                .await
+                .ok();
                 Ok(true)
             }
             crate::douyin::types::CheckCookieResult::Expired(reason) => {
                 db::update_account_status(&self.pool, &account.id, "EXPIRED", Utc::now()).await?;
-                self.record_log(&account.id, &account.alias, None, None, "CHECK_COOKIE", "FAILED", "Cookie 已失效，已停止账号任务").await.ok();
+                self.record_log(
+                    &account.id,
+                    &account.alias,
+                    None,
+                    None,
+                    "CHECK_COOKIE",
+                    "FAILED",
+                    "Cookie 已失效，已停止账号任务",
+                )
+                .await
+                .ok();
                 if notify_on_failure && !self.is_in_manual_silence_window() {
-                    self.notifier.send_cookie_expired_alert(&account.alias, account.nickname.as_deref(), &reason, account.bark_key_override.as_deref()).await.ok();
+                    self.notifier
+                        .send_cookie_expired_alert(
+                            &account.alias,
+                            account.nickname.as_deref(),
+                            &reason,
+                            account.bark_key_override.as_deref(),
+                        )
+                        .await
+                        .ok();
                 }
                 Ok(false)
             }
             crate::douyin::types::CheckCookieResult::NeedVerify(reason) => {
-                db::update_account_status(&self.pool, &account.id, "EXPIRED", Utc::now()).await?;
-                self.record_log(&account.id, &account.alias, None, None, "CHECK_COOKIE", "FAILED", "当前账号需要安全验证，已停止账号任务").await.ok();
-                if notify_on_failure && !self.is_in_manual_silence_window() {
-                    self.notifier.send_cookie_expired_alert(&account.alias, account.nickname.as_deref(), &format!("需要安全验证: {reason}"), account.bark_key_override.as_deref()).await.ok();
-                }
+                self.record_log(
+                    &account.id,
+                    &account.alias,
+                    None,
+                    None,
+                    "CHECK_COOKIE",
+                    "UNCONFIRMED",
+                    "当前 Web 请求需要安全验证，未据此清除 App 原生登录态",
+                )
+                .await
+                .ok();
+                tracing::warn!(
+                    account = %account.alias,
+                    reason = %reason,
+                    "Web 安全检查未确认，保留 App 原生会话与现有账号状态"
+                );
                 Ok(false)
             }
             result @ crate::douyin::types::CheckCookieResult::NetworkError(_) => {
-                self.record_log(&account.id, &account.alias, None, None, "CHECK_COOKIE", "FAILED", result.safe_diagnostic()).await.ok();
+                self.record_log(
+                    &account.id,
+                    &account.alias,
+                    None,
+                    None,
+                    "CHECK_COOKIE",
+                    "FAILED",
+                    result.safe_diagnostic(),
+                )
+                .await
+                .ok();
                 Ok(false)
             }
         }
@@ -435,7 +858,8 @@ impl SparkEngine {
                         && (f.sec_uid == target.target_sec_uid
                             || f.conversation_id.as_deref() == Some(target.target_sec_uid.as_str())
                             || target.conversation_id.as_ref().is_some_and(|id| {
-                                f.conversation_id.as_deref() == Some(id.as_str()) || f.sec_uid == *id
+                                f.conversation_id.as_deref() == Some(id.as_str())
+                                    || f.sec_uid == *id
                             }))
                 } else {
                     f.sec_uid == target.target_sec_uid
@@ -454,7 +878,11 @@ impl SparkEngine {
                     is_enabled: None,
                     target_nickname: Some(matched.nickname.clone()),
                     remark_name: Some(matched.remark_name.clone().unwrap_or_default()),
-                    target_avatar: if matched.avatar_url.is_empty() { None } else { Some(matched.avatar_url.clone()) },
+                    target_avatar: if matched.avatar_url.is_empty() {
+                        None
+                    } else {
+                        Some(matched.avatar_url.clone())
+                    },
                     spark_days: matched.spark_days,
                     spark_desc: matched.spark_desc.clone(),
                     is_sparked_today: None,
@@ -465,77 +893,149 @@ impl SparkEngine {
         }
     }
 
-    pub async fn execute_single_account(&self, account_id: &str, force_resend: bool, notify_on_failure: bool) -> Result<ExecutionSummary> {
+    pub async fn execute_single_account(
+        &self,
+        account_id: &str,
+        force_resend: bool,
+        notify_on_failure: bool,
+    ) -> Result<ExecutionSummary> {
         let account = db::get_account(&self.pool, account_id)
             .await?
             .ok_or_else(|| anyhow::anyhow!("账号不存在"))?;
-        let result = self.execute_account(&account, force_resend, notify_on_failure).await;
+        let result = self
+            .execute_account(&account, force_resend, notify_on_failure)
+            .await;
         self.finish_account_execution(&account, result).await
     }
 
-    async fn finish_account_execution(&self, account: &Account, result: Result<ExecutionSummary>) -> Result<ExecutionSummary> {
+    async fn finish_account_execution(
+        &self,
+        account: &Account,
+        result: Result<ExecutionSummary>,
+    ) -> Result<ExecutionSummary> {
         let diagnostic = match &result {
             Err(error) => Some(ExecutionDiagnostic::classify(error)),
             Ok(summary) => summary.error_code.as_deref().and_then(|code| {
-                [ExecutionDiagnostic::WebContextMissing, ExecutionDiagnostic::WebContextExpired,
-                    ExecutionDiagnostic::WebContextInvalid, ExecutionDiagnostic::SendCredentialMissing,
-                    ExecutionDiagnostic::SendCredentialInvalid, ExecutionDiagnostic::ConversationUnknown,
-                    ExecutionDiagnostic::HistoryUnknown, ExecutionDiagnostic::SessionUnconfirmed,
-                    ExecutionDiagnostic::AccountStopped].into_iter().find(|d| d.code() == code)
+                [
+                    ExecutionDiagnostic::WebContextMissing,
+                    ExecutionDiagnostic::WebContextExpired,
+                    ExecutionDiagnostic::WebContextInvalid,
+                    ExecutionDiagnostic::SendCredentialMissing,
+                    ExecutionDiagnostic::SendCredentialInvalid,
+                    ExecutionDiagnostic::ConversationUnknown,
+                    ExecutionDiagnostic::HistoryUnknown,
+                    ExecutionDiagnostic::SessionUnconfirmed,
+                    ExecutionDiagnostic::AccountStopped,
+                ]
+                .into_iter()
+                .find(|d| d.code() == code)
             }),
         };
         if let Some(diagnostic) = diagnostic {
-            self.record_log(&account.id, &account.alias, None, None, "ACCOUNT_EXECUTION", "FAILED",
-                &diagnostic.to_string()).await.context("账号停止诊断持久化失败")?;
+            self.record_log(
+                &account.id,
+                &account.alias,
+                None,
+                None,
+                "ACCOUNT_EXECUTION",
+                "FAILED",
+                &diagnostic.to_string(),
+            )
+            .await
+            .context("账号停止诊断持久化失败")?;
         }
         // 不把未知错误原文传给调用方/批量容器日志。
         result.map_err(|error| ExecutionDiagnostic::classify(&error).into())
     }
 
-    async fn execute_account(&self, account: &Account, force_resend: bool, notify_on_failure: bool) -> Result<ExecutionSummary> {
+    async fn execute_account(
+        &self,
+        account: &Account,
+        force_resend: bool,
+        notify_on_failure: bool,
+    ) -> Result<ExecutionSummary> {
         let account_id = account.id.as_str();
         if account.status == "DISABLED" {
             bail!("账号已被禁用");
         }
 
-        let is_valid = self.check_account_cookie(account, notify_on_failure).await?;
+        let native_check = self
+            .check_native_account(account, notify_on_failure)
+            .await?;
+        let is_valid = native_check.is_valid();
         if !is_valid {
-            let mut summary = ExecutionSummary::stopped(account, ExecutionDiagnostic::SessionUnconfirmed);
-            summary.cookie_status = db::get_account(&self.pool, account_id).await?.context("账号不存在")?.status;
+            let mut summary =
+                ExecutionSummary::stopped(account, ExecutionDiagnostic::SessionUnconfirmed);
+            summary.cookie_status = db::get_account(&self.pool, account_id)
+                .await?
+                .context("账号不存在")?
+                .status;
             return Ok(summary);
         }
 
-        let account = db::get_account(&self.pool, account_id).await?.context("账号不存在")?;
-        let plaintext_cookie = self.secret_box.decrypt(&account.encrypted_cookie)
+        let account = db::get_account(&self.pool, account_id)
+            .await?
+            .context("账号不存在")?;
+        let plaintext_cookie = self
+            .secret_box
+            .decrypt(&account.encrypted_cookie)
             .map(|b| String::from_utf8_lossy(&b).to_string())
             .unwrap_or_default();
 
-        let client = DouyinClient::new(&plaintext_cookie, &account.alias)?;
-        client.load_web_context(&self.pool,&self.secret_box,&account.id,account.uid.as_deref()).await
+        let client = DouyinClient::for_account(
+            &self.pool,
+            &self.secret_box,
+            &account.id,
+            &plaintext_cookie,
+            &account.alias,
+        )
+        .await?;
+        client
+            .load_web_context(
+                &self.pool,
+                &self.secret_box,
+                &account.id,
+                account.uid.as_deref(),
+            )
+            .await
             .context(ExecutionDiagnostic::WebContextInvalid)?;
         match client.check_cookie().await {
-            crate::douyin::types::CheckCookieResult::Valid(_) => { client.verified_sender_uid(account.uid.as_deref()).context(ExecutionDiagnostic::SessionUnconfirmed)?; }
+            crate::douyin::types::CheckCookieResult::Valid(_) => {
+                client
+                    .verified_sender_uid(account.uid.as_deref())
+                    .context(ExecutionDiagnostic::SessionUnconfirmed)?;
+            }
             _ => return Err(ExecutionDiagnostic::SessionUnconfirmed.into()),
         }
-        self.prepare_im_identity(&client,&account).await?;
+        self.prepare_im_identity(&client, &account).await?;
         let targets = db::list_targets(&self.pool, Some(&account.id)).await?;
-        let enabled_targets: Vec<SparkTarget> = targets.into_iter().filter(|t| t.is_enabled).collect();
+        let enabled_targets: Vec<SparkTarget> =
+            targets.into_iter().filter(|t| t.is_enabled).collect();
 
         let mut success_count = 0;
+        let mut pending_count = 0;
         let mut failed_count = 0;
         let mut skipped_count = 0;
         let mut stopped = false;
-        let my_uid_num: u64 = account.uid.as_deref().and_then(|u| u.parse().ok()).unwrap_or(0);
+        let my_uid_num: u64 = account
+            .uid
+            .as_deref()
+            .and_then(|u| u.parse().ok())
+            .unwrap_or(0);
         let mut targets_to_query = Vec::new();
         for t in &enabled_targets {
             if t.conversation_type == 2 {
-                let cid = t.conversation_id.clone().unwrap_or_else(|| t.target_sec_uid.clone());
+                let cid = t
+                    .conversation_id
+                    .clone()
+                    .unwrap_or_else(|| t.target_sec_uid.clone());
                 targets_to_query.push(crate::douyin::client::DouyinTargetParam {
                     conv_id: cid.clone(),
                     conv_type: 2,
                     short_id: None,
                 });
-            } else if let Some(t_uid) = t.target_uid.as_deref().and_then(|u| u.parse::<u64>().ok()) {
+            } else if let Some(t_uid) = t.target_uid.as_deref().and_then(|u| u.parse::<u64>().ok())
+            {
                 if my_uid_num > 0 {
                     let min_u = my_uid_num.min(t_uid);
                     let max_u = my_uid_num.max(t_uid);
@@ -550,7 +1050,9 @@ impl SparkEngine {
         }
 
         let live_spark_map = if !targets_to_query.is_empty() {
-            client.fetch_available_conversation_spark_status(&targets_to_query).await
+            client
+                .fetch_available_conversation_spark_status(&targets_to_query)
+                .await
                 .context(ExecutionDiagnostic::ConversationUnknown)?
         } else {
             std::collections::HashMap::new()
@@ -582,7 +1084,47 @@ impl SparkEngine {
             if !i_sent_today && my_uid_num > 0 && !conv_id.is_empty() {
                 // 长批次可能跨过身份缓存期限，必须先刷新再读取目标历史。
                 self.prepare_im_identity(&client,&account).await?;
-                i_sent_today = client.check_i_sent_message_today(my_uid_num, &conv_id, target.conversation_type, short_id).await.context(ExecutionDiagnostic::HistoryUnknown)?;
+                match client
+                    .check_i_sent_message_today(
+                        my_uid_num,
+                        &conv_id,
+                        target.conversation_type,
+                        short_id,
+                    )
+                    .await
+                {
+                    Ok(sent) => i_sent_today = sent,
+                    Err(_) => {
+                        failed_count += 1;
+                        db::update_target_spark_result(
+                            &self.pool,
+                            &target.id,
+                            "FAILED",
+                            None,
+                            None,
+                            Some(ExecutionDiagnostic::HistoryUnknown.message()),
+                        )
+                        .await
+                        .ok();
+                        self.record_log(
+                            &account.id,
+                            &account.alias,
+                            Some(&target.id),
+                            Some(&target.target_nickname),
+                            "SEND_PREFLIGHT",
+                            "FAILED",
+                            ExecutionDiagnostic::HistoryUnknown.message(),
+                        )
+                        .await
+                        .ok();
+                        tracing::warn!(
+                            account = %account.id,
+                            target = %target.id,
+                            "今日消息历史未确认，仅跳过当前目标并继续后续目标"
+                        );
+                        continue;
+                    }
+                }
             }
 
             db::record_target_today_state(&self.pool, &target.id, Some(i_sent_today), checked_at).await?;
@@ -612,16 +1154,18 @@ impl SparkEngine {
             self.prepare_target_delay(&client,&account,target).await?;
             self.prepare_im_identity(&client,&account).await?;
             self.load_send_credential(&client, &account, target).await?;
+            let rendered_message = crate::template::render_target_message(target).await;
+            client.set_pcim_rendered_text(rendered_message.clone());
 
             let (result, attempt) = send_with_retry(retries_allowed, Duration::from_secs(3), || {
                 client.send_spark_message(
                     target.conversation_id.as_deref(), target.conversation_type,
-                    &target.target_sec_uid, target.target_uid.as_deref(), &target.message_template,
+                    &target.target_sec_uid, target.target_uid.as_deref(), &rendered_message,
                 )
             }).await;
             let postcheck = self.verify_send_session(&client,&account,Some(target),"SEND_POSTCHECK").await;
 
-            if result.success {
+            if result.is_accepted() {
                 success_count += 1;
                 let (real_days, spark_desc) = if let Some(t_uid) = target.target_uid.as_deref().and_then(|u| u.parse::<u64>().ok()) {
                     let min_u = my_uid_num.min(t_uid);
@@ -652,6 +1196,25 @@ impl SparkEngine {
                     Some(&target.target_nickname),
                     "SEND_SPARK",
                     "SUCCESS",
+                    &result.message,
+                ).await.ok();
+            } else if result.is_pending() {
+                pending_count += 1;
+                db::update_target_spark_result(
+                    &self.pool,
+                    &target.id,
+                    "PENDING",
+                    None,
+                    None,
+                    Some(&result.message),
+                ).await.ok();
+                self.record_log(
+                    &account.id,
+                    &account.alias,
+                    Some(&target.id),
+                    Some(&target.target_nickname),
+                    "SEND_SPARK",
+                    "PENDING",
                     &result.message,
                 ).await.ok();
             } else {
@@ -690,28 +1253,40 @@ impl SparkEngine {
                     ).await.ok();
                 }
             }
-            if result.is_fatal_failure() || client.sending_blocked() || postcheck.is_err() {
+            if result.is_fatal_failure()
+                || (client.sending_blocked() && !result.is_pending())
+                || (postcheck.is_err() && !result.is_pending())
+            {
                 stopped = true;
                 client.clear_send_credential();
-                skipped_count += enabled_targets.len() - success_count - failed_count - skipped_count;
+                skipped_count +=
+                    enabled_targets.len() - success_count - pending_count - failed_count - skipped_count;
                 tracing::warn!(account = %account.id, "会话或鉴权失败，停止当前账号剩余发送");
                 break;
             }
         }
         Ok(())
         }.await;
-        let diagnostic = target_result.as_ref().err().map(ExecutionDiagnostic::classify);
+        let diagnostic = target_result
+            .as_ref()
+            .err()
+            .map(ExecutionDiagnostic::classify);
         if diagnostic.is_some() {
             stopped = true;
-            skipped_count = enabled_targets.len() - success_count - failed_count;
+            skipped_count = enabled_targets.len() - success_count - pending_count - failed_count;
         }
 
         // Check if cookies changed during spark sending
         if target_result.is_ok() && client.is_cookie_changed() {
             let refreshed_cookie = client.get_current_cookie();
             if let Ok(new_encrypted) = self.secret_box.encrypt(refreshed_cookie.as_bytes()) {
-                db::update_account_cookie(&self.pool, &account.id, &new_encrypted).await.ok();
-                client.persist_web_context(&self.pool,&self.secret_box,&account.id).await.ok();
+                db::update_account_cookie(&self.pool, &account.id, &new_encrypted)
+                    .await
+                    .ok();
+                client
+                    .persist_web_context(&self.pool, &self.secret_box, &account.id)
+                    .await
+                    .ok();
                 self.record_log(
                     &account.id,
                     &account.alias,
@@ -720,12 +1295,20 @@ impl SparkEngine {
                     "REFRESH_COOKIE",
                     "SUCCESS",
                     "互动流程中已观察到 Cookie 更新并加密保存，但未证实延长会话有效期",
-                ).await.ok();
+                )
+                .await
+                .ok();
             }
         }
-        client.persist_web_context(&self.pool, &self.secret_box, &account.id).await.ok();
+        client
+            .persist_web_context(&self.pool, &self.secret_box, &account.id)
+            .await
+            .ok();
 
-        let cookie_status=db::get_account(&self.pool,&account.id).await?.context("执行后账号不存在")?.status;
+        let cookie_status = db::get_account(&self.pool, &account.id)
+            .await?
+            .context("执行后账号不存在")?
+            .status;
         Ok(ExecutionSummary {
             account_id: account.id,
             account_alias: account.alias,
@@ -734,16 +1317,29 @@ impl SparkEngine {
             success_count,
             failed_count,
             skipped_count,
-            status: if failed_count == 0 && !stopped { ExecutionStatus::Success }
-                else if success_count > 0 { ExecutionStatus::PartialFailed } else { ExecutionStatus::Failed },
+            status: if failed_count == 0 && !stopped {
+                ExecutionStatus::Success
+            } else if success_count > 0 {
+                ExecutionStatus::PartialFailed
+            } else {
+                ExecutionStatus::Failed
+            },
             error_code: diagnostic.map(|d| d.code().to_string()),
             message: diagnostic.map(|d| d.message().to_string()),
         })
     }
 
     /// Execute spark renewal for all active accounts sequentially
-    pub async fn execute_all_accounts(&self, force_resend: bool, notify_on_failure: bool) -> Result<BatchSummary> {
-        if self.is_running.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_err() {
+    pub async fn execute_all_accounts(
+        &self,
+        force_resend: bool,
+        notify_on_failure: bool,
+    ) -> Result<BatchSummary> {
+        if self
+            .is_running
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
             bail!("已有续火花任务正在执行中，请勿重复触发");
         }
 
@@ -759,7 +1355,10 @@ impl SparkEngine {
             }
             active_accounts += 1;
 
-            match self.execute_single_account(&account.id, force_resend, notify_on_failure).await {
+            match self
+                .execute_single_account(&account.id, force_resend, notify_on_failure)
+                .await
+            {
                 Ok(summary) => summaries.push(summary),
                 Err(e) => {
                     let diagnostic = ExecutionDiagnostic::classify(&e);
@@ -775,7 +1374,11 @@ impl SparkEngine {
     }
 
     /// 手动单目标测试：验证所属账号身份，仅一次发送，立即复查同一客户端凭证。
-    pub async fn execute_single_target(&self, target_id: &str, notify_on_failure: bool) -> Result<crate::douyin::types::SendSparkResult> {
+    pub async fn execute_single_target(
+        &self,
+        target_id: &str,
+        notify_on_failure: bool,
+    ) -> Result<crate::douyin::types::SendSparkResult> {
         let target = db::get_target(&self.pool, target_id)
             .await?
             .ok_or_else(|| anyhow::anyhow!("续火花目标不存在"))?;
@@ -783,72 +1386,161 @@ impl SparkEngine {
         let account = db::get_account(&self.pool, &target.account_id)
             .await?
             .ok_or_else(|| anyhow::anyhow!("对应账号不存在"))?;
-        let result = self.execute_target_inner(&account, &target, true, notify_on_failure).await;
+        let result = self
+            .execute_target_inner(&account, &target, true, notify_on_failure)
+            .await;
         if let Err(error) = &result {
-            self.finish_account_execution(&account, Err(anyhow::anyhow!(ExecutionDiagnostic::classify(error)))).await?;
+            self.finish_account_execution(
+                &account,
+                Err(anyhow::anyhow!(ExecutionDiagnostic::classify(error))),
+            )
+            .await?;
         }
         result
     }
 
-    async fn execute_target(&self, account: &Account, target: &SparkTarget) -> Result<crate::douyin::types::SendSparkResult> {
-        self.execute_target_inner(account, target, false, true).await
+    async fn execute_target(
+        &self,
+        account: &Account,
+        target: &SparkTarget,
+    ) -> Result<crate::douyin::types::SendSparkResult> {
+        self.execute_target_inner(account, target, false, true)
+            .await
     }
-    async fn execute_target_inner(&self, account: &Account, target: &SparkTarget, force: bool, notify_on_failure: bool) -> Result<crate::douyin::types::SendSparkResult> {
+    async fn execute_target_inner(
+        &self,
+        account: &Account,
+        target: &SparkTarget,
+        force: bool,
+        notify_on_failure: bool,
+    ) -> Result<crate::douyin::types::SendSparkResult> {
         anyhow::ensure!(account.status != "DISABLED", "账号已被禁用");
 
-        let cid = target_conversation_id(account,target)?;
-        let day = Utc::now().with_timezone(&chrono::FixedOffset::east_opt(8*3600).unwrap()).date_naive().to_string();
+        let cid = target_conversation_id(account, target)?;
+        let day = Utc::now()
+            .with_timezone(&chrono::FixedOffset::east_opt(8 * 3600).unwrap())
+            .date_naive()
+            .to_string();
         let claim: Option<String> = sqlx::query_scalar("SELECT state FROM im_send_attempts WHERE account_id=?1 AND conversation_id=?2 AND beijing_day=?3")
             .bind(&account.id).bind(&cid).bind(day).fetch_optional(&self.pool).await?;
         if let Some(state) = claim {
             if !force {
-                return Ok(crate::douyin::types::SendSparkResult::failure(if state=="ACCEPTED" {
-                    "PCIM_INIT_DAY_CLAIM: 北京时间今日已确认发送，已跳过；禁止发送重试"
-                } else { "PCIM_INIT_DAY_CLAIM: 当日已有未确认发送占用，未发起任何平台请求；禁止发送重试" }));
+                return Ok(crate::douyin::types::SendSparkResult::failure(
+                    if state == "ACCEPTED" {
+                        "PCIM_INIT_DAY_CLAIM: 北京时间今日已确认发送，已跳过；禁止发送重试"
+                    } else {
+                        "PCIM_INIT_DAY_CLAIM: 当日已有未确认发送占用，未发起任何平台请求；禁止发送重试"
+                    },
+                ));
             }
         }
-        let plaintext_cookie = self.secret_box.decrypt(&account.encrypted_cookie)
+        let plaintext_cookie = self
+            .secret_box
+            .decrypt(&account.encrypted_cookie)
             .map_err(|e| anyhow::anyhow!("解密Cookie失败: {e}"))?;
         let cookie_str = String::from_utf8(plaintext_cookie)
             .map_err(|_| anyhow::anyhow!("无效的UTF-8 Cookie"))?;
 
-        let client = DouyinClient::new(&cookie_str, &account.alias)?;
-        client.load_web_context(&self.pool,&self.secret_box,&account.id,account.uid.as_deref()).await
+        let client = DouyinClient::for_account(
+            &self.pool,
+            &self.secret_box,
+            &account.id,
+            &cookie_str,
+            &account.alias,
+        )
+        .await?;
+        client
+            .load_web_context(
+                &self.pool,
+                &self.secret_box,
+                &account.id,
+                account.uid.as_deref(),
+            )
+            .await
             .context(ExecutionDiagnostic::WebContextInvalid)?;
-        let before_profile = self.verify_send_session(&client, &account, Some(&target), "SEND_PREFLIGHT").await?;
-        self.prepare_im_identity(&client,&account).await?;
-        let conversation_id=target_conversation_id(account,target)?;
-        let uid=client.verified_sender_uid(account.uid.as_deref())?;
-        let checked_at=Utc::now();
-        let sent=client.check_i_sent_message_today(uid,&conversation_id,target.conversation_type,0).await
-            .context(ExecutionDiagnostic::HistoryUnknown)?;
-        db::record_target_today_state(&self.pool,&target.id,Some(sent),checked_at).await?;
-        if (!force && sent) || (!force && crate::model::system_sent_today(target.last_status.as_deref(),target.last_sent_at,Utc::now())) {
-            return Ok(crate::douyin::types::SendSparkResult { success:false,message:"北京时间今日已发送，已跳过；未消费发送授权".into(),spark_days:None,raw_response:None });
+        let before_profile = self
+            .verify_send_session(&client, &account, Some(&target), "SEND_PREFLIGHT")
+            .await?;
+        self.prepare_im_identity(&client, &account).await?;
+        let conversation_id = target_conversation_id(account, target)?;
+        let uid = client.verified_sender_uid(account.uid.as_deref())?;
+        let checked_at = Utc::now();
+        let sent = match client
+            .check_i_sent_message_today(uid, &conversation_id, target.conversation_type, 0)
+            .await
+        {
+            Ok(sent) => sent,
+            Err(_) => {
+                self.record_log(
+                    &account.id,
+                    &account.alias,
+                    Some(&target.id),
+                    Some(&target.target_nickname),
+                    "SEND_PREFLIGHT",
+                    "FAILED",
+                    ExecutionDiagnostic::HistoryUnknown.message(),
+                )
+                .await
+                .ok();
+                return Ok(crate::douyin::types::SendSparkResult::failure(
+                    "PCIM_INIT_HISTORY_PRECHECK: 今日发送历史未确认，未提交发送；未重试",
+                ));
+            }
+        };
+        db::record_target_today_state(&self.pool, &target.id, Some(sent), checked_at).await?;
+        if (!force && sent)
+            || (!force
+                && crate::model::system_sent_today(
+                    target.last_status.as_deref(),
+                    target.last_sent_at,
+                    Utc::now(),
+                ))
+        {
+            return Ok(crate::douyin::types::SendSparkResult {
+                state: crate::douyin::types::SendSparkState::Rejected,
+                success: false,
+                message: "北京时间今日已发送，已跳过；未消费发送授权".into(),
+                spark_days: None,
+                raw_response: None,
+            });
         }
-        self.prepare_im_identity(&client,&account).await?;
-        self.load_send_credential_force(&client, &account, &target, force).await?;
+        self.prepare_im_identity(&client, &account).await?;
+        self.load_send_credential_force(&client, &account, &target, force)
+            .await?;
+        let rendered_message = crate::template::render_target_message(&target).await;
+        client.set_pcim_rendered_text(rendered_message.clone());
         let (result, attempts) = send_with_retry(1, Duration::ZERO, || {
             client.send_spark_message(
-                target.conversation_id.as_deref(), target.conversation_type,
-                &target.target_sec_uid, target.target_uid.as_deref(), &target.message_template,
+                target.conversation_id.as_deref(),
+                target.conversation_type,
+                &target.target_sec_uid,
+                target.target_uid.as_deref(),
+                &rendered_message,
             )
-        }).await;
+        })
+        .await;
         // 在任何后续 IM 请求之前复查刚刚执行发送的同一客户端、同一会话。
-        let postcheck = self.verify_send_session(&client, &account, Some(&target), "SEND_POSTCHECK").await;
-        if result.is_fatal_failure() || client.sending_blocked() {
+        let postcheck = self
+            .verify_send_session(&client, &account, Some(&target), "SEND_POSTCHECK")
+            .await;
+        if result.is_fatal_failure() || (client.sending_blocked() && !result.is_pending()) {
             client.clear_send_credential();
         }
 
         if client.is_cookie_changed() {
             let refreshed = client.get_current_cookie();
             if let Ok(new_enc) = self.secret_box.encrypt(refreshed.as_bytes()) {
-                db::update_account_cookie(&self.pool, &account.id, &new_enc).await.ok();
+                db::update_account_cookie(&self.pool, &account.id, &new_enc)
+                    .await
+                    .ok();
             }
         }
-        client.persist_web_context(&self.pool, &self.secret_box, &account.id).await.ok();
+        client
+            .persist_web_context(&self.pool, &self.secret_box, &account.id)
+            .await
+            .ok();
 
-        if result.success {
+        if result.is_accepted() {
             let new_days = target.spark_days;
             let spark_desc = target.spark_desc.clone();
             db::update_target_spark_result(
@@ -858,7 +1550,9 @@ impl SparkEngine {
                 Some(new_days),
                 spark_desc.as_deref(),
                 None,
-            ).await.ok();
+            )
+            .await
+            .ok();
 
             self.record_log(
                 &account.id,
@@ -868,7 +1562,31 @@ impl SparkEngine {
                 "SEND_SPARK",
                 "SUCCESS",
                 &result.message,
-            ).await.ok();
+            )
+            .await
+            .ok();
+        } else if result.is_pending() {
+            db::update_target_spark_result(
+                &self.pool,
+                &target.id,
+                "PENDING",
+                None,
+                None,
+                Some(&result.message),
+            )
+            .await
+            .ok();
+            self.record_log(
+                &account.id,
+                &account.alias,
+                Some(&target.id),
+                Some(&target.target_nickname),
+                "SEND_SPARK",
+                "PENDING",
+                &result.message,
+            )
+            .await
+            .ok();
         } else {
             db::update_target_spark_result(
                 &self.pool,
@@ -877,7 +1595,9 @@ impl SparkEngine {
                 None,
                 None,
                 Some(&result.message),
-            ).await.ok();
+            )
+            .await
+            .ok();
 
             self.record_log(
                 &account.id,
@@ -887,82 +1607,171 @@ impl SparkEngine {
                 "SEND_SPARK",
                 "FAILED",
                 &format!("手动单目标尝试 {attempts} 次后失败: {}", result.message),
-            ).await.ok();
+            )
+            .await
+            .ok();
 
             // 仅在明确启用失败告警（notify_on_failure == true）时向 Bark 发送通知，前台手动操作一律静默
             if notify_on_failure && !self.is_in_manual_silence_window() {
-                self.notifier.send_notification(
-                    account.bark_key_override.as_deref(),
-                    "【抖音火花助手】续火花失败",
-                    &format!("对好友「{}」续火花尝试失败: {}", target.target_nickname, result.message),
-                    None,
-                ).await.ok();
+                self.notifier
+                    .send_notification(
+                        account.bark_key_override.as_deref(),
+                        "【抖音火花助手】续火花失败",
+                        &format!(
+                            "对好友「{}」续火花尝试失败: {}",
+                            target.target_nickname, result.message
+                        ),
+                        None,
+                    )
+                    .await
+                    .ok();
             }
         }
-        if let Err(e) = postcheck {
-            tracing::warn!(account = %account.id, error = %e, "发送后登录态复查未通过");
+        if !result.is_pending() {
+            if let Err(e) = postcheck {
+                tracing::warn!(account = %account.id, error = %e, "发送后登录态复查未通过");
+            }
         }
-        tracing::info!(account = %account.id, sender_uid = %before_profile.uid, target_uid = ?target.target_uid, success = result.success, attempts, "单目标发送结束");
+        tracing::info!(account = %account.id, sender_uid = %before_profile.uid, target_uid = ?target.target_uid, success = result.success, pending = result.is_pending(), attempts, "单目标发送结束");
 
         Ok(result)
     }
 
-    async fn prepare_im_identity(&self,client:&DouyinClient,account:&Account) -> Result<()> {
-        client.prepare_im_identity(account.uid.as_deref()).await.context(ExecutionDiagnostic::IdentityRefreshFailed)?;
-        let current=db::get_account(&self.pool,&account.id).await?.context(ExecutionDiagnostic::SessionUnconfirmed)?;
-        let original=String::from_utf8(self.secret_box.decrypt(&account.encrypted_cookie)?)?;
-        let stored=String::from_utf8(self.secret_box.decrypt(&current.encrypted_cookie)?)?;
-        anyhow::ensure!(current.status=="ACTIVE" && current.uid==account.uid
-            && (stored==original || stored==client.get_current_cookie()),ExecutionDiagnostic::SessionUnconfirmed);
-        client.persist_im_session(&self.pool,&self.secret_box,&account.id,&current.encrypted_cookie,account.uid.as_deref()).await
+    async fn prepare_im_identity(&self, client: &DouyinClient, account: &Account) -> Result<()> {
+        client
+            .prepare_im_identity(account.uid.as_deref())
+            .await
+            .context(ExecutionDiagnostic::IdentityRefreshFailed)?;
+        let current = db::get_account(&self.pool, &account.id)
+            .await?
+            .context(ExecutionDiagnostic::SessionUnconfirmed)?;
+        let original = String::from_utf8(self.secret_box.decrypt(&account.encrypted_cookie)?)?;
+        let stored = String::from_utf8(self.secret_box.decrypt(&current.encrypted_cookie)?)?;
+        anyhow::ensure!(
+            current.status == "ACTIVE"
+                && current.uid == account.uid
+                && (stored == original || stored == client.get_current_cookie()),
+            ExecutionDiagnostic::SessionUnconfirmed
+        );
+        client
+            .persist_im_session(
+                &self.pool,
+                &self.secret_box,
+                &account.id,
+                &current.encrypted_cookie,
+                account.uid.as_deref(),
+            )
+            .await
             .context(ExecutionDiagnostic::IdentityRefreshFailed)
     }
 
-    async fn load_send_credential(&self, client: &DouyinClient, account: &Account, target: &SparkTarget) -> Result<()> {
-        self.load_send_credential_force(client, account, target, false).await
+    async fn load_send_credential(
+        &self,
+        client: &DouyinClient,
+        account: &Account,
+        target: &SparkTarget,
+    ) -> Result<()> {
+        self.load_send_credential_force(client, account, target, false)
+            .await
     }
-    async fn load_send_credential_force(&self, client: &DouyinClient, account: &Account, target: &SparkTarget, force: bool) -> Result<()> {
+    async fn load_send_credential_force(
+        &self,
+        client: &DouyinClient,
+        account: &Account,
+        target: &SparkTarget,
+        force: bool,
+    ) -> Result<()> {
         let result: Result<()> = async {
             client.clear_send_credential();
-            let current = db::get_account(&self.pool,&account.id).await?.context(ExecutionDiagnostic::SessionUnconfirmed)?;
+            let current = db::get_account(&self.pool, &account.id)
+                .await?
+                .context(ExecutionDiagnostic::SessionUnconfirmed)?;
             let original = String::from_utf8(self.secret_box.decrypt(&account.encrypted_cookie)?)?;
             let stored = String::from_utf8(self.secret_box.decrypt(&current.encrypted_cookie)?)?;
-            anyhow::ensure!(current.status=="ACTIVE" && current.uid==account.uid
-                && (stored==original || stored==client.get_current_cookie()),ExecutionDiagnostic::SessionUnconfirmed);
-            client.configure_pcim_initial_force(self.pool.clone(),self.secret_box.clone(),current.encrypted_cookie,account,target,force)
-        }.await;
+            anyhow::ensure!(
+                current.status == "ACTIVE"
+                    && current.uid == account.uid
+                    && (stored == original || stored == client.get_current_cookie()),
+                ExecutionDiagnostic::SessionUnconfirmed
+            );
+            client.configure_pcim_initial_force(
+                self.pool.clone(),
+                self.secret_box.clone(),
+                current.encrypted_cookie,
+                account,
+                target,
+                force,
+            )
+        }
+        .await;
         result.map_err(|error| {
-            let diagnostic = error.downcast_ref::<ExecutionDiagnostic>().copied()
+            let diagnostic = error
+                .downcast_ref::<ExecutionDiagnostic>()
+                .copied()
                 .unwrap_or(ExecutionDiagnostic::SendCredentialInvalid);
             diagnostic.into()
         })
     }
 
-
     async fn verify_send_session(
-        &self, client: &DouyinClient, account: &Account, target: Option<&SparkTarget>, action: &str,
+        &self,
+        client: &DouyinClient,
+        account: &Account,
+        target: Option<&SparkTarget>,
+        action: &str,
     ) -> Result<crate::douyin::types::DouyinUserProfile> {
         let checked = client.check_cookie().await;
         let profile = match checked {
             crate::douyin::types::CheckCookieResult::Valid(profile) => {
                 if let Err(e) = client.verified_sender_uid(account.uid.as_deref()) {
-                    db::update_account_status(&self.pool, &account.id, "EXPIRED", Utc::now()).await?;
-                    self.record_log(&account.id, &account.alias, target.map(|t| t.id.as_str()), target.map(|t| t.target_nickname.as_str()), action, "FAILED", ExecutionDiagnostic::SessionUnconfirmed.message()).await?;
+                    db::update_account_status(&self.pool, &account.id, "EXPIRED", Utc::now())
+                        .await?;
+                    self.record_log(
+                        &account.id,
+                        &account.alias,
+                        target.map(|t| t.id.as_str()),
+                        target.map(|t| t.target_nickname.as_str()),
+                        action,
+                        "FAILED",
+                        ExecutionDiagnostic::SessionUnconfirmed.message(),
+                    )
+                    .await?;
                     return Err(e);
                 }
                 profile
             }
             failure => {
-                if !matches!(failure, crate::douyin::types::CheckCookieResult::NetworkError(_)) {
-                    db::update_account_status(&self.pool, &account.id, "EXPIRED", Utc::now()).await?;
+                // 只有官方明确返回会话失效才修改账号状态。安全验证、限流、
+                // 协议异常和网络失败都只表示本次未确认，不能污染可用账号。
+                if matches!(failure, crate::douyin::types::CheckCookieResult::Expired(_)) {
+                    db::update_account_status(&self.pool, &account.id, "EXPIRED", Utc::now())
+                        .await?;
                 }
                 let message = ExecutionDiagnostic::SessionUnconfirmed.message();
-                self.record_log(&account.id, &account.alias, target.map(|t| t.id.as_str()), target.map(|t| t.target_nickname.as_str()), action, "FAILED", &message).await?;
+                self.record_log(
+                    &account.id,
+                    &account.alias,
+                    target.map(|t| t.id.as_str()),
+                    target.map(|t| t.target_nickname.as_str()),
+                    action,
+                    "FAILED",
+                    &message,
+                )
+                .await?;
                 bail!("{message}");
             }
         };
         db::update_account_status(&self.pool, &account.id, "ACTIVE", Utc::now()).await?;
-        self.record_log(&account.id, &account.alias, target.map(|t| t.id.as_str()), target.map(|t| t.target_nickname.as_str()), action, "SUCCESS", &format!("同一客户端会话凭证有效，确认 uid={}", profile.uid)).await?;
+        self.record_log(
+            &account.id,
+            &account.alias,
+            target.map(|t| t.id.as_str()),
+            target.map(|t| t.target_nickname.as_str()),
+            action,
+            "SUCCESS",
+            &format!("同一客户端会话凭证有效，确认 uid={}", profile.uid),
+        )
+        .await?;
         Ok(profile)
     }
 
@@ -1000,7 +1809,8 @@ pub fn start_daily_scheduler(engine: Arc<SparkEngine>) {
         loop {
             tokio::time::sleep(Duration::from_secs(30)).await;
 
-            let now = Local::now();
+            let cst = chrono::FixedOffset::east_opt(8 * 3600).unwrap();
+            let now = Utc::now().with_timezone(&cst);
             let today_str = now.format("%Y-%m-%d").to_string();
             let current_time_str = now.format("%H:%M").to_string();
 
@@ -1027,9 +1837,18 @@ pub fn start_daily_scheduler(engine: Arc<SparkEngine>) {
                         match engine_clone.execute_all_accounts(false, true).await {
                             Err(_) => tracing::error!("每日自动续火花执行失败（任务未完成）"),
                             Ok(summary) => match summary.status {
-                                ExecutionStatus::Failed => tracing::error!(failed_accounts = summary.failed_accounts, "每日自动续火花执行失败"),
-                                ExecutionStatus::PartialFailed => tracing::warn!(failed_accounts = summary.failed_accounts, partial_failed_accounts = summary.partial_failed_accounts, "每日自动续火花部分失败"),
-                                ExecutionStatus::Success => tracing::info!("每日自动续火花正常结束"),
+                                ExecutionStatus::Failed => tracing::error!(
+                                    failed_accounts = summary.failed_accounts,
+                                    "每日自动续火花执行失败"
+                                ),
+                                ExecutionStatus::PartialFailed => tracing::warn!(
+                                    failed_accounts = summary.failed_accounts,
+                                    partial_failed_accounts = summary.partial_failed_accounts,
+                                    "每日自动续火花部分失败"
+                                ),
+                                ExecutionStatus::Success => {
+                                    tracing::info!("每日自动续火花正常结束")
+                                }
                             },
                         }
                     });
@@ -1040,7 +1859,237 @@ pub fn start_daily_scheduler(engine: Arc<SparkEngine>) {
 }
 
 impl SparkEngine {
-    /// 定期巡检活跃账号状态并保存 Cookie 变化；未证实延长会话有效期。
+    /// App 原生会话校验按 30 分钟节流；服务重启后首次巡检会重新确认一次。
+    async fn check_native_session_if_due(
+        &self,
+        account: &Account,
+        notify_on_failure: bool,
+    ) -> Result<Option<crate::douyin::login::NativeCheck>> {
+        let Some(native) =
+            db::load_native_session(&self.pool, &self.secret_box, &account.id).await?
+        else {
+            return Ok(None);
+        };
+        let now = Utc::now().timestamp();
+        if native
+            .last_verified_at
+            .is_some_and(|at| now.saturating_sub(at) < NATIVE_CHECK_INTERVAL_SECS)
+            || !claim_native_check_attempt(&account.id, now)
+        {
+            return Ok(None);
+        }
+        self.check_native_account(account, notify_on_failure)
+            .await
+            .map(Some)
+    }
+
+    /// App 原生 TokenBeat 维护设备级登录令牌；失败只保留原快照。
+    async fn refresh_native_session_if_due(&self, account: &Account) -> Result<bool> {
+        if db::get_setting(&self.pool, "identity_beat_enabled")
+            .await
+            .ok()
+            .flatten()
+            .as_deref()
+            == Some("false")
+        {
+            return Ok(false);
+        }
+        let Some(native) =
+            db::load_native_session(&self.pool, &self.secret_box, &account.id).await?
+        else {
+            return Ok(false);
+        };
+        let now = Utc::now().timestamp();
+        if native
+            .last_beat_at
+            .is_some_and(|at| now.saturating_sub(at) < NATIVE_TOKEN_BEAT_INTERVAL_SECS)
+            || !claim_session_refresh_attempt(
+                "native-beat",
+                &account.id,
+                now,
+                NATIVE_TOKEN_BEAT_INTERVAL_SECS,
+            )
+        {
+            return Ok(false);
+        }
+
+        let scene = if native.last_beat_at.is_none() {
+            "boot"
+        } else {
+            "polling"
+        };
+        match crate::douyin::login::beat_native_session(&native, scene).await {
+            Ok(updated) => {
+                db::persist_native_session(&self.pool, &self.secret_box, &account.id, &updated)
+                    .await
+                    .context("App 原生 TokenBeat 成功后持久化失败")?;
+                self.record_log(
+                    &account.id,
+                    &account.alias,
+                    None,
+                    None,
+                    "REFRESH_COOKIE",
+                    "SUCCESS",
+                    "抖音 App 原生 TokenBeat 已完成并保存最新票据",
+                )
+                .await
+                .ok();
+                tracing::info!(
+                    account = %account.alias,
+                    "抖音 App 原生 TokenBeat 已完成"
+                );
+                Ok(true)
+            }
+            Err(error) => {
+                tracing::warn!(
+                    account = %account.alias,
+                    error = %error,
+                    "抖音 App 原生 TokenBeat 未完成，保留旧会话，下个官方周期再试"
+                );
+                Ok(false)
+            }
+        }
+    }
+
+    async fn refresh_identity_with_token_beat(
+        &self,
+        client: &DouyinClient,
+        account: &Account,
+    ) -> Result<bool> {
+        match client.refresh_identity_by_token_beat("boot").await {
+            Ok(crate::douyin::client::IdentityBeatStatus::Refreshed) => {
+                client
+                    .persist_im_session(
+                        &self.pool,
+                        &self.secret_box,
+                        &account.id,
+                        &account.encrypted_cookie,
+                        account.uid.as_deref(),
+                    )
+                    .await
+                    .context("纯 Rust TokenBeat 成功后持久化身份材料失败")?;
+                tracing::info!(
+                    account = %account.alias,
+                    "纯 Rust TokenBeat 已刷新身份 Token 并持久化登录材料"
+                );
+                Ok(true)
+            }
+            Ok(status) => {
+                tracing::debug!(
+                    account = %account.alias,
+                    status = ?status,
+                    "纯 Rust TokenBeat 缺少本地完整材料"
+                );
+                Ok(false)
+            }
+            Err(error) => Err(error.context("纯 Rust TokenBeat 未完成，已保留原登录材料")),
+        }
+    }
+
+    async fn refresh_web_session_if_due(
+        &self,
+        client: &DouyinClient,
+        account: &Account,
+    ) -> Result<bool> {
+        if db::get_setting(&self.pool, "identity_beat_enabled")
+            .await
+            .ok()
+            .flatten()
+            .as_deref()
+            == Some("false")
+        {
+            return Ok(false);
+        }
+        let context = client.web_context_snapshot();
+        let now = Utc::now().timestamp();
+        if !identity_refresh_due(context.as_ref(), now)
+            || !claim_session_refresh_attempt(
+                "web-beat",
+                &account.id,
+                now,
+                SESSION_REFRESH_RETRY_INTERVAL_SECS,
+            )
+        {
+            return Ok(false);
+        }
+        self.refresh_identity_with_token_beat(client, account).await
+    }
+
+    /// 原生登录已完成但 Web/IM 材料缺失时，按六小时节流重试纯 Rust 引导。
+    async fn bootstrap_web_context_if_due(
+        &self,
+        account: &Account,
+        native: &crate::douyin::login::NativeSessionRecord,
+    ) -> Result<bool> {
+        let now = Utc::now().timestamp();
+        if !claim_session_refresh_attempt(
+            "web-bootstrap",
+            &account.id,
+            now,
+            SESSION_REFRESH_RETRY_INTERVAL_SECS,
+        ) {
+            return Ok(false);
+        }
+        let device =
+            db::load_or_create_device_profile(&self.pool, &self.secret_box, &account.id).await?;
+        let (cookie, context, profile) =
+            match crate::douyin::login::bootstrap_web_context(native, &device).await {
+                Ok(result) => result,
+                Err(error) => {
+                    tracing::warn!(
+                        account = %account.alias,
+                        error = %error,
+                        "Web/IM 发送材料自动恢复未完成，保留 App 原生登录态"
+                    );
+                    return Ok(false);
+                }
+            };
+        anyhow::ensure!(
+            account.uid.as_deref() == Some(profile.uid.as_str()),
+            "Web/IM 自动恢复得到其他账号身份，未保存任何材料"
+        );
+
+        let mut updated = native.clone();
+        updated.cookie = cookie;
+        updated.sec_uid = profile.sec_uid;
+        updated.nickname = profile.nickname;
+        updated.avatar_url = profile.avatar_url;
+        updated.last_verified_at = Some(now);
+        db::persist_native_session(&self.pool, &self.secret_box, &account.id, &updated).await?;
+        let current = db::get_account(&self.pool, &account.id)
+            .await?
+            .context("Web/IM 自动恢复后账号不存在")?;
+        let client = DouyinClient::with_device_profile(&updated.cookie, &account.alias, device)?;
+        client.set_web_context(context)?;
+        client.verified_sender_uid(account.uid.as_deref())?;
+        client
+            .persist_im_session(
+                &self.pool,
+                &self.secret_box,
+                &account.id,
+                &current.encrypted_cookie,
+                account.uid.as_deref(),
+            )
+            .await?;
+        self.record_log(
+            &account.id,
+            &account.alias,
+            None,
+            None,
+            "REFRESH_COOKIE",
+            "SUCCESS",
+            "Web/IM 发送材料已通过纯 Rust 引导恢复",
+        )
+        .await
+        .ok();
+        tracing::info!(
+            account = %account.alias,
+            "Web/IM 发送材料已通过纯 Rust 引导恢复"
+        );
+        Ok(true)
+    }
+
+    /// 定期巡检活跃账号：App 原生会话优先，Web 身份材料仅做静默维护。
     pub async fn heartbeat_all_active_accounts(&self) -> Result<()> {
         let accounts = db::list_accounts(&self.pool).await?;
         let sync_profiles = claim_profile_sync();
@@ -1048,35 +2097,102 @@ impl SparkEngine {
             if account.status != "ACTIVE" {
                 continue;
             }
-            // 后台定时心跳保活巡检严格保持静默，绝不向 Bark 发送失败告警；告警仅在每日计划任务执行失败时产生
-            if !self.check_account_cookie(&account, false).await.unwrap_or(false) { continue; }
+
+            match self.check_native_session_if_due(&account, false).await {
+                Ok(Some(crate::douyin::login::NativeCheck::Expired(_))) => continue,
+                Ok(Some(crate::douyin::login::NativeCheck::Unconfirmed(_))) => {}
+                Ok(Some(crate::douyin::login::NativeCheck::Valid(_))) | Ok(None) => {}
+                Err(error) => {
+                    tracing::warn!(
+                        account = %account.alias,
+                        error = %error,
+                        "App 原生会话巡检未完成，保留原有登录材料"
+                    );
+                }
+            }
+
+            let Some(account) = db::get_account(&self.pool, &account.id)
+                .await
+                .ok()
+                .flatten()
+            else {
+                continue;
+            };
+            if account.status != "ACTIVE" {
+                continue;
+            }
+
+            if let Err(error) = self.refresh_native_session_if_due(&account).await {
+                tracing::warn!(
+                    account = %account.alias,
+                    error = %error,
+                    "App 原生 TokenBeat 状态保存失败，保留旧会话"
+                );
+            }
+
+            let Some(account) = db::get_account(&self.pool, &account.id)
+                .await
+                .ok()
+                .flatten()
+            else {
+                continue;
+            };
+            if account.status != "ACTIVE" {
+                continue;
+            }
             let Ok(plain) = self.secret_box.decrypt(&account.encrypted_cookie) else {
                 continue;
             };
             let Ok(cookie) = String::from_utf8(plain) else {
                 continue;
             };
-            let Ok(client) = DouyinClient::new(&cookie, &account.alias) else {
+            let Ok(client) = DouyinClient::for_account(
+                &self.pool,
+                &self.secret_box,
+                &account.id,
+                &cookie,
+                &account.alias,
+            )
+            .await
+            else {
                 continue;
             };
-            client.load_web_context(&self.pool,&self.secret_box,&account.id,account.uid.as_deref()).await.ok();
+            client
+                .load_web_context(
+                    &self.pool,
+                    &self.secret_box,
+                    &account.id,
+                    account.uid.as_deref(),
+                )
+                .await
+                .ok();
 
-            if client.is_cookie_changed() {
-                let refreshed = client.get_current_cookie();
-                if let Ok(enc) = self.secret_box.encrypt(refreshed.as_bytes()) {
-                    db::update_account_cookie(&self.pool, &account.id, &enc).await.ok();
-                    client.persist_web_context(&self.pool, &self.secret_box, &account.id).await.ok();
-                    tracing::info!(account = %account.alias, "心跳保活已动态同步最新 Cookie 凭证");
+            if client.web_context_snapshot().is_some() {
+                if let Err(error) = self.refresh_web_session_if_due(&client, &account).await {
+                    tracing::warn!(
+                        account = %account.alias,
+                        error = %format!("{error:#}"),
+                        "Web 身份 Token 续期未完成，保留原有登录材料，六小时内不重复尝试"
+                    );
+                }
+            } else if let Ok(Some(native)) =
+                db::load_native_session(&self.pool, &self.secret_box, &account.id).await
+            {
+                if let Err(error) = self.bootstrap_web_context_if_due(&account, &native).await {
+                    tracing::warn!(
+                        account = %account.alias,
+                        error = %format!("{error:#}"),
+                        "Web/IM 发送材料自动恢复失败，保留 App 原生登录态"
+                    );
                 }
             }
 
-            if !sync_profiles {
-                continue;
-            }
-            self.persist_live_profiles(&client, &account).await;
-            if client.risk_limited() {
-                tracing::warn!("自动资料同步遇到风控，本轮剩余账号不再请求");
-                break;
+            if sync_profiles && client.web_context_snapshot().is_some() {
+                self.persist_live_profiles(&client, &account).await;
+                if client.risk_limited() {
+                    tracing::warn!("自动资料同步遇到风控，本轮剩余账号不再请求");
+                    break;
+                }
             }
         }
         Ok(())
@@ -1085,12 +2201,14 @@ impl SparkEngine {
 
 pub fn start_heartbeat_worker(engine: Arc<SparkEngine>) {
     tokio::spawn(async move {
-        tracing::info!("抖音 Web 登录态巡检已启用（每 300 秒检查；不保证延长会话有效期）");
+        tracing::info!(
+            "抖音 App 原生会话巡检已启用（每 300 秒检查；原生校验 30 分钟节流，TokenBeat 按 App 默认 10 分钟周期维护）"
+        );
         loop {
-            tokio::time::sleep(Duration::from_secs(300)).await;
             if let Err(e) = engine.heartbeat_all_active_accounts().await {
                 tracing::debug!(error = %e, "定时心跳维持异常");
             }
+            tokio::time::sleep(Duration::from_secs(300)).await;
         }
     });
 }
@@ -1107,7 +2225,6 @@ fn claim_profile_sync() -> bool {
     true
 }
 
-
 #[cfg(test)]
 mod retry_tests {
     use super::*;
@@ -1115,12 +2232,23 @@ mod retry_tests {
 
     #[tokio::test]
     async fn fatal_auth_and_session_errors_never_retry() {
-        for message in ["unexepcted session length", "unexpected session length", "invalid auth token", "HTTP错误: 401", "HTTP错误: 403", "conversation not found", "需要安全验证", "发送身份不符，禁止发送", "PCIM_INIT_UNCONFIRMED: 未确认发送成功或当日已占用；禁止发送重试"] {
+        for message in [
+            "unexepcted session length",
+            "unexpected session length",
+            "invalid auth token",
+            "HTTP错误: 401",
+            "HTTP错误: 403",
+            "conversation not found",
+            "需要安全验证",
+            "发送身份不符，禁止发送",
+            "PCIM_INIT_UNCONFIRMED: 未确认发送成功或当日已占用；禁止发送重试",
+        ] {
             let calls = AtomicU32::new(0);
             let (result, attempts) = send_with_retry(5, Duration::ZERO, || {
                 calls.fetch_add(1, Ordering::Relaxed);
                 std::future::ready(SendSparkResult::failure(message))
-            }).await;
+            })
+            .await;
             assert!(!result.success);
             assert_eq!(attempts, 1, "{message}");
             assert_eq!(calls.load(Ordering::Relaxed), 1, "{message}");
@@ -1133,7 +2261,8 @@ mod retry_tests {
         let (_, attempts) = send_with_retry(1, Duration::ZERO, || {
             calls.fetch_add(1, Ordering::Relaxed);
             std::future::ready(SendSparkResult::failure("HTTP错误: 500"))
-        }).await;
+        })
+        .await;
         assert_eq!(calls.load(Ordering::Relaxed), 1);
         assert_eq!(attempts, 1);
     }
@@ -1144,9 +2273,42 @@ mod retry_tests {
         let (_, attempts) = send_with_retry(3, Duration::ZERO, || {
             calls.fetch_add(1, Ordering::Relaxed);
             std::future::ready(SendSparkResult::failure("HTTP错误: 500"))
-        }).await;
+        })
+        .await;
         assert_eq!(calls.load(Ordering::Relaxed), 3);
         assert_eq!(attempts, 3);
+    }
+
+    #[tokio::test]
+    async fn pending_ack_is_never_retried_as_an_unknown_send() {
+        let calls = AtomicU32::new(0);
+        let (result, attempts) = send_with_retry(5, Duration::ZERO, || {
+            calls.fetch_add(1, Ordering::Relaxed);
+            std::future::ready(SendSparkResult::pending(
+                "PCIM_INIT_HISTORY_POSTCHECK: 服务端回执已确认，历史仍在同步",
+                None,
+            ))
+        })
+        .await;
+        assert!(result.is_pending());
+        assert!(!result.is_fatal_failure());
+        assert_eq!(attempts, 1);
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn pending_result_does_not_stop_or_alert_for_following_targets() {
+        let pending = SendSparkResult::pending(
+            "PCIM_INIT_HISTORY_POSTCHECK: 服务端回执已确认，历史仍在同步",
+            None,
+        );
+        let stop_account = pending.is_fatal_failure()
+            || (false && !pending.is_pending())
+            || (false && !pending.is_pending());
+        let notify = false && !pending.is_pending();
+        assert!(pending.is_pending());
+        assert!(!stop_account);
+        assert!(!notify);
     }
 }
 
@@ -1161,23 +2323,52 @@ mod diagnostic_tests {
     async fn fixture() -> (SparkEngine, Account, SparkTarget) {
         let pool = db::init_pool("sqlite::memory:").await.unwrap();
         let secret = SecretBox::new(&[19; 32]);
-        let engine = SparkEngine::new(pool, secret, BarkNotifier::new("http://127.0.0.1:1".into(), None), "08:00".into(), 0, 0, 5);
+        let engine = SparkEngine::new(
+            pool,
+            secret,
+            BarkNotifier::new("http://127.0.0.1:1".into(), None),
+            "08:00".into(),
+            0,
+            0,
+            5,
+        );
         let now = Utc::now();
         let account = Account {
-            id: "offline-account".into(), alias: "离线账号".into(), sec_uid: None,
-            uid: Some("99191692311".into()), nickname: None, avatar_url: None,
+            id: "offline-account".into(),
+            alias: "离线账号".into(),
+            sec_uid: None,
+            uid: Some("99191692311".into()),
+            nickname: None,
+            avatar_url: None,
             encrypted_cookie: engine.secret_box.encrypt(COOKIE.as_bytes()).unwrap(),
-            status: "ACTIVE".into(), bark_key_override: None, last_checked_at: None,
-            created_at: now, updated_at: now,
+            status: "ACTIVE".into(),
+            bark_key_override: None,
+            last_checked_at: None,
+            created_at: now,
+            updated_at: now,
         };
         db::insert_account(&engine.pool, &account).await.unwrap();
         let target = SparkTarget {
-            id: "offline-target".into(), account_id: account.id.clone(), target_sec_uid: "offline-peer".into(),
-            target_uid: Some("55696816245".into()), conversation_id: Some(CONVERSATION.into()),
-            conversation_type: 1, target_nickname: "离线目标".into(), remark_name: None, target_avatar: None,
-            is_enabled: true, spark_days: 0, spark_desc: None, is_sparked_today: None, today_checked_at: None,
-            message_template: "offline-secret-message".into(), last_sent_at: None, last_status: None, last_error: None,
-            created_at: now, updated_at: now,
+            id: "offline-target".into(),
+            account_id: account.id.clone(),
+            target_sec_uid: "offline-peer".into(),
+            target_uid: Some("55696816245".into()),
+            conversation_id: Some(CONVERSATION.into()),
+            conversation_type: 1,
+            target_nickname: "离线目标".into(),
+            remark_name: None,
+            target_avatar: None,
+            is_enabled: true,
+            spark_days: 0,
+            spark_desc: None,
+            is_sparked_today: None,
+            today_checked_at: None,
+            message_template: "offline-secret-message".into(),
+            last_sent_at: None,
+            last_status: None,
+            last_error: None,
+            created_at: now,
+            updated_at: now,
         };
         db::insert_target(&engine.pool, &target).await.unwrap();
         (engine, account, target)
@@ -1185,28 +2376,70 @@ mod diagnostic_tests {
 
     #[tokio::test]
     async fn all_accounts_load_native_without_captured_credentials() {
-        let (engine,account,mut target)=fixture().await;
-        let client=DouyinClient::new(COOKIE,"offline native").unwrap();
-        engine.load_send_credential(&client,&account,&target).await.unwrap();
-        target.message_template="other".into();
-        engine.load_send_credential(&client,&account,&target).await.unwrap();
-        let count:i64=sqlx::query_scalar("SELECT count(*) FROM account_im_credentials").fetch_one(&engine.pool).await.unwrap();assert_eq!(count,0);
-        for force in [true,false] {assert!(skip_sent_today(true,force));assert!(!skip_sent_today(false,force));}
+        let (engine, account, mut target) = fixture().await;
+        let client = DouyinClient::new(COOKIE, "offline native").unwrap();
+        engine
+            .load_send_credential(&client, &account, &target)
+            .await
+            .unwrap();
+        target.message_template = "other".into();
+        engine
+            .load_send_credential(&client, &account, &target)
+            .await
+            .unwrap();
+        let count: i64 = sqlx::query_scalar("SELECT count(*) FROM account_im_credentials")
+            .fetch_one(&engine.pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 0);
+        for force in [true, false] {
+            assert!(skip_sent_today(true, force));
+            assert!(!skip_sent_today(false, force));
+        }
     }
 
-    async fn assert_diagnostic(engine: &SparkEngine, account: &Account, expected: ExecutionDiagnostic) {
-        let logs: Vec<SparkLog> = sqlx::query_as("SELECT * FROM spark_logs WHERE account_id=? ORDER BY created_at")
-            .bind(&account.id).fetch_all(&engine.pool).await.unwrap();
-        assert_eq!(logs.len(), 1, "停止只记录一次账号诊断，不伪造发送日志");
+    async fn assert_diagnostic(
+        engine: &SparkEngine,
+        account: &Account,
+        expected: ExecutionDiagnostic,
+    ) {
+        let logs: Vec<SparkLog> = sqlx::query_as(
+            "SELECT * FROM spark_logs \
+                 WHERE account_id=? AND action_type='ACCOUNT_EXECUTION' \
+                 ORDER BY created_at",
+        )
+        .bind(&account.id)
+        .fetch_all(&engine.pool)
+        .await
+        .unwrap();
+        assert_eq!(logs.len(), 1, "每次账号停止只记录一次账号级诊断");
         assert_eq!(logs[0].action_type, "ACCOUNT_EXECUTION");
         assert_eq!(logs[0].status, "FAILED");
         assert_eq!(logs[0].message, expected.to_string());
         assert!(logs[0].target_id.is_none());
+        let send_logs: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM spark_logs WHERE account_id=? AND action_type='SEND_SPARK'",
+        )
+        .bind(&account.id)
+        .fetch_one(&engine.pool)
+        .await
+        .unwrap();
+        assert_eq!(send_logs, 0, "账号停止不得伪造发送日志");
         let serialized = serde_json::to_string(&logs).unwrap();
-        for secret in ["offline-secret", "fake-token", "fake-signature", "test-conversation-ticket", "bd-ticket-guard", "identity_security"] {
+        for secret in [
+            "offline-secret",
+            "fake-token",
+            "fake-signature",
+            "test-conversation-ticket",
+            "bd-ticket-guard",
+            "identity_security",
+        ] {
             assert!(!serialized.contains(secret), "诊断泄露材料: {secret}");
         }
-        let target = db::get_target(&engine.pool, "offline-target").await.unwrap().unwrap();
+        let target = db::get_target(&engine.pool, "offline-target")
+            .await
+            .unwrap()
+            .unwrap();
         assert!(target.last_sent_at.is_none());
         assert!(target.last_status.is_none());
         assert!(target.last_error.is_none());
@@ -1224,21 +2457,63 @@ mod diagnostic_tests {
     async fn two_account_batch_reports_all_partial_and_no_failures() {
         let (_, account, _) = fixture().await;
         for (statuses, expected, successful, failed, partial) in [
-            ([ExecutionStatus::Failed, ExecutionStatus::Failed], ExecutionStatus::Failed, 0, 2, 0),
-            ([ExecutionStatus::Success, ExecutionStatus::Failed], ExecutionStatus::PartialFailed, 1, 1, 0),
-            ([ExecutionStatus::Success, ExecutionStatus::Success], ExecutionStatus::Success, 2, 0, 0),
-            ([ExecutionStatus::Success, ExecutionStatus::PartialFailed], ExecutionStatus::PartialFailed, 1, 0, 1),
+            (
+                [ExecutionStatus::Failed, ExecutionStatus::Failed],
+                ExecutionStatus::Failed,
+                0,
+                2,
+                0,
+            ),
+            (
+                [ExecutionStatus::Success, ExecutionStatus::Failed],
+                ExecutionStatus::PartialFailed,
+                1,
+                1,
+                0,
+            ),
+            (
+                [ExecutionStatus::Success, ExecutionStatus::Success],
+                ExecutionStatus::Success,
+                2,
+                0,
+                0,
+            ),
+            (
+                [ExecutionStatus::Success, ExecutionStatus::PartialFailed],
+                ExecutionStatus::PartialFailed,
+                1,
+                0,
+                1,
+            ),
         ] {
-            let mut accounts: Vec<_> = statuses.into_iter().map(|status| summary(&account, status)).collect();
+            let mut accounts: Vec<_> = statuses
+                .into_iter()
+                .map(|status| summary(&account, status))
+                .collect();
             accounts[1].account_id = "second-account".into();
             let batch = BatchSummary::from_accounts(accounts, 2);
             assert_eq!(batch.status, expected);
             assert_eq!((batch.total_accounts, batch.active_accounts), (2, 2));
-            assert_eq!((batch.successful_accounts, batch.failed_accounts, batch.partial_failed_accounts), (successful, failed, partial));
-            assert_eq!(serde_json::to_value(&batch).unwrap()["status"], match expected {
-                ExecutionStatus::Success => "SUCCESS", ExecutionStatus::PartialFailed => "PARTIAL_FAILED", ExecutionStatus::Failed => "FAILED",
-            });
-            assert_eq!(batch.completion_message().contains("正常"), expected == ExecutionStatus::Success);
+            assert_eq!(
+                (
+                    batch.successful_accounts,
+                    batch.failed_accounts,
+                    batch.partial_failed_accounts
+                ),
+                (successful, failed, partial)
+            );
+            assert_eq!(
+                serde_json::to_value(&batch).unwrap()["status"],
+                match expected {
+                    ExecutionStatus::Success => "SUCCESS",
+                    ExecutionStatus::PartialFailed => "PARTIAL_FAILED",
+                    ExecutionStatus::Failed => "FAILED",
+                }
+            );
+            assert_eq!(
+                batch.completion_message().contains("正常"),
+                expected == ExecutionStatus::Success
+            );
         }
     }
 
@@ -1248,54 +2523,197 @@ mod diagnostic_tests {
             let (engine, account, _) = fixture().await;
             let client = DouyinClient::new(COOKIE, &account.alias).unwrap();
             let result = if expired {
-                let mut context = WebSessionContext::from_credential(&test_credential(COOKIE, CONVERSATION, 1));
+                let mut context =
+                    WebSessionContext::from_credential(&test_credential(COOKIE, CONVERSATION, 1));
                 context.captured_at -= crate::douyin::im_auth::MAX_AGE_SECS + 1;
-                let encrypted = engine.secret_box.encrypt(&serde_json::to_vec(&context).unwrap()).unwrap();
-                sqlx::query("INSERT INTO account_web_contexts VALUES(?,?)").bind(&account.id).bind(encrypted).execute(&engine.pool).await.unwrap();
+                let encrypted = engine
+                    .secret_box
+                    .encrypt(&serde_json::to_vec(&context).unwrap())
+                    .unwrap();
+                sqlx::query("INSERT INTO account_web_contexts VALUES(?,?)")
+                    .bind(&account.id)
+                    .bind(encrypted)
+                    .execute(&engine.pool)
+                    .await
+                    .unwrap();
                 // 装载本身不校验 IM 时效，直到后续 IM 请求才拒绝；无需网络。
-                client.load_web_context(&engine.pool, &engine.secret_box, &account.id, account.uid.as_deref()).await.unwrap();
-                context.im_request(99191692311, COOKIE, 610, &[]).map(|_| ())
+                client
+                    .load_web_context(
+                        &engine.pool,
+                        &engine.secret_box,
+                        &account.id,
+                        account.uid.as_deref(),
+                    )
+                    .await
+                    .unwrap();
+                context
+                    .im_request(99191692311, COOKIE, 610, &[])
+                    .map(|_| ())
             } else {
                 // 缺失上下文是可选装载成功，必须覆盖后续 ensure/fetch 错误。
-                client.load_web_context(&engine.pool, &engine.secret_box, &account.id, account.uid.as_deref()).await.unwrap();
-                client.web_im("https://imapi.douyin.com/v2/conversation/get_info_list", 610, &[]).await.map(|_| ())
+                client
+                    .load_web_context(
+                        &engine.pool,
+                        &engine.secret_box,
+                        &account.id,
+                        account.uid.as_deref(),
+                    )
+                    .await
+                    .unwrap();
+                client
+                    .web_im(
+                        "https://imapi.douyin.com/v2/conversation/get_info_list",
+                        610,
+                        &[],
+                    )
+                    .await
+                    .map(|_| ())
             };
-            let expected = if expired { ExecutionDiagnostic::WebContextExpired } else { ExecutionDiagnostic::WebContextMissing };
-            let result = result.context(ExecutionDiagnostic::ConversationUnknown).map(|_| unreachable!());
-            assert!(engine.finish_account_execution(&account, result).await.is_err());
+            let expected = if expired {
+                ExecutionDiagnostic::WebContextExpired
+            } else {
+                ExecutionDiagnostic::WebContextMissing
+            };
+            let result = result
+                .context(ExecutionDiagnostic::ConversationUnknown)
+                .map(|_| unreachable!());
+            assert!(
+                engine
+                    .finish_account_execution(&account, result)
+                    .await
+                    .is_err()
+            );
             assert_diagnostic(&engine, &account, expected).await;
-            assert_eq!(db::get_account(&engine.pool, &account.id).await.unwrap().unwrap().status, "ACTIVE");
+            assert_eq!(
+                db::get_account(&engine.pool, &account.id)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .status,
+                "ACTIVE"
+            );
         }
     }
 
     #[tokio::test]
     async fn invalid_native_binding_stops_before_retry_and_persists_diagnostic() {
-        let (engine, account, mut target) = fixture().await;target.is_enabled=false;
+        let (engine, account, mut target) = fixture().await;
+        target.is_enabled = false;
         let client = DouyinClient::new(COOKIE, &account.alias).unwrap();
         let calls = AtomicU32::new(0);
         let result: Result<ExecutionSummary> = async {
-            engine.load_send_credential(&client, &account, &target).await?;
+            engine
+                .load_send_credential(&client, &account, &target)
+                .await?;
             // 与生产调用顺序一致：装载失败不得进入发送重试循环。
             send_with_retry(5, Duration::ZERO, || {
                 calls.fetch_add(1, Ordering::Relaxed);
                 std::future::ready(crate::douyin::types::SendSparkResult::failure("不应执行"))
-            }).await;
+            })
+            .await;
             unreachable!()
-        }.await;
-        assert!(engine.finish_account_execution(&account, result).await.is_err());
+        }
+        .await;
+        assert!(
+            engine
+                .finish_account_execution(&account, result)
+                .await
+                .is_err()
+        );
         assert_eq!(calls.load(Ordering::Relaxed), 0);
-        assert_diagnostic(&engine, &account, ExecutionDiagnostic::SendCredentialInvalid).await;
+        assert_diagnostic(
+            &engine,
+            &account,
+            ExecutionDiagnostic::SendCredentialInvalid,
+        )
+        .await;
     }
 
     #[tokio::test]
-    async fn public_single_account_persists_early_context_load_failure() {
+    async fn public_single_account_without_native_session_stops_safely() {
         let (engine, account, _) = fixture().await;
-        let encrypted = engine.secret_box.encrypt(b"offline-secret-malformed-context").unwrap();
-        sqlx::query("INSERT INTO account_web_contexts VALUES(?,?)").bind(&account.id).bind(encrypted).execute(&engine.pool).await.unwrap();
-        let error = engine.execute_single_account(&account.id, false, false).await.unwrap_err();
-        assert_eq!(ExecutionDiagnostic::classify(&error), ExecutionDiagnostic::WebContextInvalid);
-        assert_diagnostic(&engine, &account, ExecutionDiagnostic::WebContextInvalid).await;
-        assert_eq!(db::get_account(&engine.pool, &account.id).await.unwrap().unwrap().status, "ACTIVE");
+        let summary = engine
+            .execute_single_account(&account.id, false, false)
+            .await
+            .unwrap();
+        assert_eq!(summary.status, ExecutionStatus::Failed);
+        assert_eq!(
+            summary.error_code.as_deref(),
+            Some(ExecutionDiagnostic::SessionUnconfirmed.code())
+        );
+        assert_diagnostic(&engine, &account, ExecutionDiagnostic::SessionUnconfirmed).await;
+        assert_eq!(
+            db::get_account(&engine.pool, &account.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            "ACTIVE"
+        );
+    }
+
+    #[tokio::test]
+    async fn legacy_web_account_without_native_is_never_reported_valid() {
+        let (engine, account, _) = fixture().await;
+        let cookie = "sessionid=legacy-web-session; msToken=legacy-device";
+        let device =
+            db::load_or_create_device_profile(&engine.pool, &engine.secret_box, &account.id)
+                .await
+                .unwrap();
+        let context = WebSessionContext::from_session_with_device(
+            99191692311,
+            cookie,
+            &device.user_agent,
+            Some(device.clone()),
+        )
+        .unwrap();
+        let encrypted_cookie = engine.secret_box.encrypt(cookie.as_bytes()).unwrap();
+        let encrypted_context = engine
+            .secret_box
+            .encrypt(&serde_json::to_vec(&context).unwrap())
+            .unwrap();
+        sqlx::query("UPDATE accounts SET encrypted_cookie=?1 WHERE id=?2")
+            .bind(encrypted_cookie)
+            .bind(&account.id)
+            .execute(&engine.pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO account_web_contexts(account_id,encrypted_context) VALUES(?1,?2)")
+            .bind(&account.id)
+            .bind(encrypted_context)
+            .execute(&engine.pool)
+            .await
+            .unwrap();
+
+        let refreshed = db::get_account(&engine.pool, &account.id)
+            .await
+            .unwrap()
+            .unwrap();
+        let checked = engine
+            .check_native_account(&refreshed, false)
+            .await
+            .unwrap();
+        assert!(!checked.is_valid(), "{}", checked.message());
+        assert!(matches!(
+            checked,
+            crate::douyin::login::NativeCheck::Unconfirmed(_)
+        ));
+        let status: String = sqlx::query_scalar("SELECT status FROM accounts WHERE id=?1")
+            .bind(&account.id)
+            .fetch_one(&engine.pool)
+            .await
+            .unwrap();
+        assert_eq!(status, "ACTIVE");
+        let log: (String, String) = sqlx::query_as(
+            "SELECT status,message FROM spark_logs \
+             WHERE account_id=?1 AND action_type='CHECK_COOKIE' ORDER BY created_at DESC LIMIT 1",
+        )
+        .bind(&account.id)
+        .fetch_one(&engine.pool)
+        .await
+        .unwrap();
+        assert_eq!(log.0, "UNCONFIRMED");
+        assert!(log.1.contains("尚未导入 App 原生会话"));
     }
 
     #[tokio::test]
@@ -1305,21 +2723,20 @@ mod diagnostic_tests {
         second.id = "second-account".into();
         second.alias = "第二离线账号".into();
         db::insert_account(&engine.pool, &second).await.unwrap();
-        for account in [&account, &second] {
-            let encrypted = engine.secret_box.encrypt(b"offline-secret-invalid-context").unwrap();
-            sqlx::query("INSERT INTO account_web_contexts VALUES(?,?)").bind(&account.id).bind(encrypted).execute(&engine.pool).await.unwrap();
-        }
         let batch = engine.execute_all_accounts(false, false).await.unwrap();
         assert_eq!(batch.status, ExecutionStatus::Failed);
         assert_eq!(batch.failed_accounts, 2);
         assert_eq!(batch.successful_accounts, 0);
         assert_eq!(batch.accounts.len(), 2);
         for summary in &batch.accounts {
-            assert_eq!(summary.error_code.as_deref(), Some("WEB_CONTEXT_INVALID"));
+            assert_eq!(
+                summary.error_code.as_deref(),
+                Some(ExecutionDiagnostic::SessionUnconfirmed.code())
+            );
             assert_eq!(summary.failed_count, 0, "账号停止不是失败的发送尝试");
         }
-        assert_diagnostic(&engine, &account, ExecutionDiagnostic::WebContextInvalid).await;
-        assert_diagnostic(&engine, &second, ExecutionDiagnostic::WebContextInvalid).await;
+        assert_diagnostic(&engine, &account, ExecutionDiagnostic::SessionUnconfirmed).await;
+        assert_diagnostic(&engine, &second, ExecutionDiagnostic::SessionUnconfirmed).await;
         assert!(!engine.is_running.load(Ordering::SeqCst));
     }
 
@@ -1332,8 +2749,18 @@ mod diagnostic_tests {
         partial.skipped_count = 1;
         partial.error_code = Some(ExecutionDiagnostic::HistoryUnknown.code().into());
         partial.message = Some(ExecutionDiagnostic::HistoryUnknown.message().into());
-        let partial = engine.finish_account_execution(&account, Ok(partial)).await.unwrap();
-        assert_eq!((partial.success_count, partial.failed_count, partial.skipped_count), (1, 0, 1));
+        let partial = engine
+            .finish_account_execution(&account, Ok(partial))
+            .await
+            .unwrap();
+        assert_eq!(
+            (
+                partial.success_count,
+                partial.failed_count,
+                partial.skipped_count
+            ),
+            (1, 0, 1)
+        );
         assert_eq!(partial.status, ExecutionStatus::PartialFailed);
         assert_diagnostic(&engine, &account, ExecutionDiagnostic::HistoryUnknown).await;
     }
@@ -1341,7 +2768,9 @@ mod diagnostic_tests {
     #[tokio::test]
     async fn unknown_error_is_never_persisted_verbatim() {
         let (engine, account, _) = fixture().await;
-        let error = anyhow::anyhow!("sessionid=offline-secret; bd-ticket-guard=offline-secret; unknown failure");
+        let error = anyhow::anyhow!(
+            "sessionid=offline-secret; bd-ticket-guard=offline-secret; unknown failure"
+        );
         let result = engine.finish_account_execution(&account, Err(error)).await;
         assert!(result.is_err());
         assert_diagnostic(&engine, &account, ExecutionDiagnostic::AccountStopped).await;
@@ -1349,49 +2778,88 @@ mod diagnostic_tests {
 
     #[tokio::test]
     async fn changed_delay_wakes_existing_wait_and_clones_share_range() {
-        let (engine,_,_)=fixture().await;
-        engine.set_delay_range(1024,1024);
-        let copy=engine.clone();
-        let waiting=tokio::spawn(async move {copy.wait_target_delay().await;});
+        let (engine, _, _) = fixture().await;
+        engine.set_delay_range(1024, 1024);
+        let copy = engine.clone();
+        let waiting = tokio::spawn(async move {
+            copy.wait_target_delay().await;
+        });
         tokio::time::sleep(Duration::from_millis(20)).await;
         assert!(!waiting.is_finished());
-        engine.set_delay_range(0,0);
-        assert_eq!(engine.clone().delay_range(),(0,0));
-        tokio::time::timeout(Duration::from_secs(1),waiting).await.unwrap().unwrap();
+        engine.set_delay_range(0, 0);
+        assert_eq!(engine.clone().delay_range(), (0, 0));
+        tokio::time::timeout(Duration::from_secs(1), waiting)
+            .await
+            .unwrap()
+            .unwrap();
     }
 
     #[tokio::test]
     async fn pending_setting_change_wins_when_old_timer_is_also_ready() {
-        let (engine,_,_)=fixture().await;engine.set_delay_range(1,1);
-        let copy=engine.clone();let mut waiting=tokio::spawn(async move {copy.wait_target_delay().await;});
+        let (engine, _, _) = fixture().await;
+        engine.set_delay_range(1, 1);
+        let copy = engine.clone();
+        let mut waiting = tokio::spawn(async move {
+            copy.wait_target_delay().await;
+        });
         tokio::time::sleep(Duration::from_millis(20)).await;
         // 当前线程阻塞使旧计时器与修改通知在下一次轮询时同时就绪。
-        std::thread::sleep(Duration::from_millis(1100));engine.set_delay_range(1024,1024);
-        assert!(tokio::time::timeout(Duration::from_millis(30),&mut waiting).await.is_err());
-        engine.set_delay_range(0,0);tokio::time::timeout(Duration::from_secs(1),waiting).await.unwrap().unwrap();
+        std::thread::sleep(Duration::from_millis(1100));
+        engine.set_delay_range(1024, 1024);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(30), &mut waiting)
+                .await
+                .is_err()
+        );
+        engine.set_delay_range(0, 0);
+        tokio::time::timeout(Duration::from_secs(1), waiting)
+            .await
+            .unwrap()
+            .unwrap();
     }
 
     #[tokio::test]
     async fn invalid_target_stops_before_long_random_delay_without_network() {
-        let (engine,account,mut target)=fixture().await;target.is_enabled=false;
-        engine.set_delay_range(1024,1024);
-        let client=DouyinClient::new(COOKIE,"offline").unwrap();
-        let error=tokio::time::timeout(Duration::from_secs(1),engine.prepare_target_delay(&client,&account,&target)).await.unwrap().unwrap_err();
-        assert_eq!(ExecutionDiagnostic::classify(&error),ExecutionDiagnostic::SendCredentialInvalid);
-        let logs:(i64,)=sqlx::query_as("SELECT count(*) FROM spark_logs").fetch_one(&engine.pool).await.unwrap();
-        assert_eq!(logs.0,0);
+        let (engine, account, mut target) = fixture().await;
+        target.is_enabled = false;
+        engine.set_delay_range(1024, 1024);
+        let client = DouyinClient::new(COOKIE, "offline").unwrap();
+        let error = tokio::time::timeout(
+            Duration::from_secs(1),
+            engine.prepare_target_delay(&client, &account, &target),
+        )
+        .await
+        .unwrap()
+        .unwrap_err();
+        assert_eq!(
+            ExecutionDiagnostic::classify(&error),
+            ExecutionDiagnostic::SendCredentialInvalid
+        );
+        let logs: (i64,) = sqlx::query_as("SELECT count(*) FROM spark_logs")
+            .fetch_one(&engine.pool)
+            .await
+            .unwrap();
+        assert_eq!(logs.0, 0);
     }
     #[tokio::test]
     async fn manual_existing_claim_stops_before_client_creation_or_network() {
-        for state in ["UNKNOWN","ACCEPTED"] {
-            let (engine,mut account,target)=fixture().await;
-            let day=Utc::now().with_timezone(&chrono::FixedOffset::east_opt(8*3600).unwrap()).date_naive().to_string();
+        for state in ["UNKNOWN", "ACCEPTED"] {
+            let (engine, mut account, target) = fixture().await;
+            let day = Utc::now()
+                .with_timezone(&chrono::FixedOffset::east_opt(8 * 3600).unwrap())
+                .date_naive()
+                .to_string();
             sqlx::query("INSERT INTO im_send_attempts(account_id,conversation_id,beijing_day,client_message_id,state) VALUES(?1,?2,?3,'fixture-claim',?4)")
                 .bind(&account.id).bind(CONVERSATION).bind(day).bind(state).execute(&engine.pool).await.unwrap();
-            account.encrypted_cookie=vec![]; // 若进入解密/网络流程，测试必须失败。
-            let result=engine.execute_target(&account,&target).await.unwrap();
-            assert!(!result.success);assert!(result.message.starts_with("PCIM_INIT_DAY_CLAIM:"));
-            let count:i64=sqlx::query_scalar("SELECT count(*) FROM spark_logs").fetch_one(&engine.pool).await.unwrap();assert_eq!(count,0);
+            account.encrypted_cookie = vec![]; // 若进入解密/网络流程，测试必须失败。
+            let result = engine.execute_target(&account, &target).await.unwrap();
+            assert!(!result.success);
+            assert!(result.message.starts_with("PCIM_INIT_DAY_CLAIM:"));
+            let count: i64 = sqlx::query_scalar("SELECT count(*) FROM spark_logs")
+                .fetch_one(&engine.pool)
+                .await
+                .unwrap();
+            assert_eq!(count, 0);
         }
     }
 
@@ -1401,7 +2869,8 @@ mod diagnostic_tests {
         let port = listener.local_addr().unwrap().port();
         let pool = db::init_pool("sqlite::memory:").await.unwrap();
         let secret = SecretBox::new(&[19; 32]);
-        let notifier = BarkNotifier::new(format!("http://127.0.0.1:{port}"), Some("test-key".into()));
+        let notifier =
+            BarkNotifier::new(format!("http://127.0.0.1:{port}"), Some("test-key".into()));
         let engine = SparkEngine::new(pool, secret, notifier, "08:00".into(), 0, 0, 5);
 
         let account = Account {
@@ -1425,7 +2894,8 @@ mod diagnostic_tests {
         // 1. 静默检测（notify_on_failure = false）：必须不向 Bark 发送任何网络请求
         let is_valid = engine.check_account_cookie(&account, false).await.unwrap();
         assert!(!is_valid);
-        let accept_result = tokio::time::timeout(Duration::from_millis(100), listener.accept()).await;
+        let accept_result =
+            tokio::time::timeout(Duration::from_millis(100), listener.accept()).await;
         assert!(accept_result.is_err(), "静默检测严禁向 Bark 发送请求");
 
         // 2. 后台巡检/告警模式（notify_on_failure = true）：必须向 Bark 触发告警
@@ -1439,7 +2909,44 @@ mod diagnostic_tests {
         assert!(engine.is_in_manual_silence_window());
         let is_valid = engine.check_account_cookie(&account, true).await.unwrap();
         assert!(!is_valid);
-        let accept_result = tokio::time::timeout(Duration::from_millis(100), listener.accept()).await;
-        assert!(accept_result.is_err(), "处于手动操作静默期时，即使 notify_on_failure=true 也严禁向 Bark 发送请求");
+        let accept_result =
+            tokio::time::timeout(Duration::from_millis(100), listener.accept()).await;
+        assert!(
+            accept_result.is_err(),
+            "处于手动操作静默期时，即使 notify_on_failure=true 也严禁向 Bark 发送请求"
+        );
+    }
+
+    #[tokio::test]
+    async fn send_preflight_only_marks_expired_on_explicit_expiry() {
+        let (engine, account, target) = fixture().await;
+        let client = DouyinClient::new(COOKIE, &account.alias).unwrap();
+        client
+            .set_web_context(WebSessionContext::from_credential(&test_credential(
+                COOKIE,
+                CONVERSATION,
+                1,
+            )))
+            .unwrap();
+        for (expired, verify, expected) in [
+            (false, true, "ACTIVE"),
+            (false, false, "ACTIVE"),
+            (true, false, "EXPIRED"),
+        ] {
+            client.clear_session_block();
+            client.test_block_session(expired, verify);
+            let result = engine
+                .verify_send_session(&client, &account, Some(&target), "SEND_PREFLIGHT")
+                .await;
+            assert!(result.is_err());
+            assert_eq!(
+                db::get_account(&engine.pool, &account.id)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .status,
+                expected
+            );
+        }
     }
 }

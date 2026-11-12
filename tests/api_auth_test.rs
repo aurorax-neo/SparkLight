@@ -1,9 +1,9 @@
-use std::sync::Arc;
 use axum::{
-    body::{to_bytes, Body},
+    body::{Body, to_bytes},
     http::{Request, StatusCode},
 };
 use serde_json::Value;
+use std::sync::Arc;
 use tower::ServiceExt;
 
 use sparklight::{
@@ -11,7 +11,7 @@ use sparklight::{
     db,
     notify::bark::BarkNotifier,
     scheduler::SparkEngine,
-    server::{create_router, AppState},
+    server::{AppState, create_router},
 };
 
 #[tokio::test]
@@ -30,27 +30,39 @@ async fn test_api_key_auth_and_cookie_encryption() {
     ));
 
     let valid_api_key = "sk_test_1234567890abcdef".to_string();
-    let state = AppState {
-        pool: pool.clone(),
-        secret_box: secret_box.clone(),
+    let state = AppState::new(
+        pool.clone(),
+        secret_box.clone(),
         engine,
-        api_key: Arc::new(valid_api_key.clone()),
-    };
+        Arc::new(valid_api_key.clone()),
+        std::env::temp_dir(),
+    );
 
     let router = create_router(state);
 
     // 1. Health check should be public
     let res = router
         .clone()
-        .oneshot(Request::builder().uri("/api/v1/system/health").body(Body::empty()).unwrap())
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/system/health")
+                .body(Body::empty())
+                .unwrap(),
+        )
         .await
         .unwrap();
     assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(res.headers()["cache-control"], "no-cache");
 
     // 2. Protected overview without API key should return 401
     let res = router
         .clone()
-        .oneshot(Request::builder().uri("/api/v1/system/overview").body(Body::empty()).unwrap())
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/system/overview")
+                .body(Body::empty())
+                .unwrap(),
+        )
         .await
         .unwrap();
     assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
@@ -103,13 +115,102 @@ async fn test_api_key_auth_and_cookie_encryption() {
 }
 
 #[tokio::test]
+async fn removed_web_cookie_routes_and_payloads_are_rejected() {
+    let pool = db::init_pool("sqlite::memory:").await.unwrap();
+    let secret_box = SecretBox::new(&[23u8; 32]);
+    let notifier = BarkNotifier::new("https://api.day.app".into(), None);
+    let engine = Arc::new(SparkEngine::new(
+        pool.clone(),
+        secret_box.clone(),
+        notifier,
+        "09:30".into(),
+        5,
+        15,
+        3,
+    ));
+    let api_key = "sk_test_removed_cookie_routes";
+    let state = AppState::new(
+        pool,
+        secret_box,
+        engine,
+        Arc::new(api_key.to_string()),
+        std::env::temp_dir(),
+    );
+    let router = create_router(state);
+
+    for (method, path, expected) in [
+        ("POST", "/api/v1/accounts", StatusCode::METHOD_NOT_ALLOWED),
+        (
+            "POST",
+            "/api/v1/accounts/acc_removed/sync-cookie",
+            StatusCode::NOT_FOUND,
+        ),
+        (
+            "POST",
+            "/api/v1/accounts/acc_removed/im-credential",
+            StatusCode::NOT_FOUND,
+        ),
+        ("POST", "/api/v1/system/launch-brave", StatusCode::NOT_FOUND),
+    ] {
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(method)
+                    .uri(path)
+                    .header("X-API-Key", api_key)
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(r#"{"cookie":"sessionid=must-not-enter"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), expected, "{method} {path}");
+    }
+
+    let response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/api/v1/accounts/acc_removed")
+                .header("X-API-Key", api_key)
+                .header("Content-Type", "application/json")
+                .body(Body::from(r#"{"cookie":"sessionid=must-not-enter"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/accounts/login/start")
+                .header("X-API-Key", api_key)
+                .header("Content-Type", "application/json")
+                .body(Body::from(
+                    r#"{"alias":"must-not-import","cookie":"sessionid=must-not-enter"}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+}
+
+#[tokio::test]
 async fn test_manual_check_account_does_not_trigger_bark() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
 
     let pool = db::init_pool("sqlite::memory:").await.unwrap();
     let secret_box = SecretBox::new(&[17u8; 32]);
-    let notifier = BarkNotifier::new(format!("http://127.0.0.1:{port}"), Some("test_bark_key".into()));
+    let notifier = BarkNotifier::new(
+        format!("http://127.0.0.1:{port}"),
+        Some("test_bark_key".into()),
+    );
     let engine = Arc::new(SparkEngine::new(
         pool.clone(),
         secret_box.clone(),
@@ -121,12 +222,13 @@ async fn test_manual_check_account_does_not_trigger_bark() {
     ));
 
     let valid_api_key = "sk_test_manual_check_123".to_string();
-    let state = AppState {
-        pool: pool.clone(),
-        secret_box: secret_box.clone(),
+    let state = AppState::new(
+        pool.clone(),
+        secret_box.clone(),
         engine,
-        api_key: Arc::new(valid_api_key.clone()),
-    };
+        Arc::new(valid_api_key.clone()),
+        std::env::temp_dir(),
+    );
 
     let router = create_router(state);
 
@@ -164,9 +266,247 @@ async fn test_manual_check_account_does_not_trigger_bark() {
     let json: Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(json["code"], 200);
     assert_eq!(json["data"]["is_valid"], false);
+    assert_eq!(json["data"]["confirmed"], false);
+    assert_eq!(json["data"]["check_state"], "unconfirmed");
+    assert_eq!(json["data"]["status"], "ACTIVE");
+    assert!(
+        json["message"]
+            .as_str()
+            .unwrap()
+            .contains("尚未导入 App 原生会话")
+    );
 
-    let accept_result = tokio::time::timeout(std::time::Duration::from_millis(150), listener.accept()).await;
+    let accept_result =
+        tokio::time::timeout(std::time::Duration::from_millis(150), listener.accept()).await;
     assert!(accept_result.is_err(), "手动检测有效性严禁向 Bark 发送通知");
+}
+
+#[tokio::test]
+async fn account_list_never_reports_expired_or_missing_native_session_as_ready() {
+    let pool = db::init_pool("sqlite::memory:").await.unwrap();
+    let secret_box = SecretBox::new(&[31u8; 32]);
+    let notifier = BarkNotifier::new("https://api.day.app".into(), None);
+    let engine = Arc::new(SparkEngine::new(
+        pool.clone(),
+        secret_box.clone(),
+        notifier,
+        "09:30".into(),
+        5,
+        15,
+        3,
+    ));
+    let api_key = "sk_test_native_readiness";
+    let state = AppState::new(
+        pool.clone(),
+        secret_box.clone(),
+        engine,
+        Arc::new(api_key.to_string()),
+        std::env::temp_dir(),
+    );
+    let router = create_router(state);
+    let now = chrono::Utc::now();
+
+    for (id, uid, expiry) in [
+        ("acc_missing_native", "11111111", None),
+        ("acc_expired_native", "22222222", Some(now.timestamp() - 1)),
+    ] {
+        let account = sparklight::model::Account {
+            id: id.into(),
+            alias: "离线原生状态测试".into(),
+            sec_uid: Some(format!("sec-{uid}")),
+            uid: Some(uid.into()),
+            nickname: Some("离线账号".into()),
+            avatar_url: None,
+            encrypted_cookie: secret_box.encrypt(b"sessionid=offline").unwrap(),
+            status: "ACTIVE".into(),
+            bark_key_override: None,
+            last_checked_at: None,
+            created_at: now,
+            updated_at: now,
+        };
+        db::insert_account(&pool, &account).await.unwrap();
+
+        if let Some(expiry) = expiry {
+            let issued = expiry - 3600;
+            let native = sparklight::douyin::login::NativeSessionRecord {
+                device: sparklight::douyin::login::NativeDevice::derive(id),
+                cookie: format!(
+                    "sessionid=offline; sid_tt=offline; sid_guard=offline%7C{issued}%7C3600%7Cpast"
+                ),
+                uid: uid.into(),
+                sec_uid: format!("sec-{uid}"),
+                nickname: "离线账号".into(),
+                avatar_url: String::new(),
+                mobile: String::new(),
+                session_key: None,
+                d_ticket: None,
+                x_tt_token: Some("offline-token".into()),
+                token_encrypted: None,
+                ts_sign: None,
+                attest_ts_sign: None,
+                mfa_token: None,
+                guard_key_hex: None,
+                guard_server_data: None,
+                dtrait_pk1_pem: None,
+                dtrait_version: None,
+                logged_in_at: issued,
+                last_verified_at: None,
+                last_beat_at: None,
+            };
+            let encrypted = secret_box
+                .encrypt(&serde_json::to_vec(&native).unwrap())
+                .unwrap();
+            sqlx::query(
+                "INSERT INTO account_native_sessions(account_id,encrypted_session,logged_in_at,last_checked_at) \
+                 VALUES(?1,?2,?3,?4)",
+            )
+            .bind(id)
+            .bind(encrypted)
+            .bind(now.to_rfc3339())
+            .bind(now.to_rfc3339())
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+    }
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/accounts")
+                .header("X-API-Key", api_key)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let json: Value = serde_json::from_slice(&body).unwrap();
+    let accounts = json["data"].as_array().unwrap();
+    assert_eq!(accounts.len(), 2);
+    for account in accounts {
+        assert_eq!(account["native_ready"], false);
+    }
+    let expired = accounts
+        .iter()
+        .find(|account| account["id"] == "acc_expired_native")
+        .unwrap();
+    assert!(expired["native_sid_expires_at"].as_i64().is_some());
+}
+
+#[tokio::test]
+async fn native_import_can_create_account_without_preexisting_target() {
+    let pool = db::init_pool("sqlite::memory:").await.unwrap();
+    let secret_box = SecretBox::new(&[41u8; 32]);
+    let notifier = BarkNotifier::new("https://api.day.app".into(), None);
+    let engine = Arc::new(SparkEngine::new(
+        pool.clone(),
+        secret_box.clone(),
+        notifier,
+        "09:30".into(),
+        5,
+        15,
+        3,
+    ));
+    let api_key = "sk_test_native_import_create";
+    let state = AppState::new(
+        pool.clone(),
+        secret_box.clone(),
+        engine,
+        Arc::new(api_key.to_string()),
+        std::env::temp_dir(),
+    );
+    let router = create_router(state);
+    let now = chrono::Utc::now().timestamp();
+    let uid = "123456789";
+    let session = sparklight::douyin::login::NativeSessionRecord {
+        device: sparklight::douyin::login::NativeDevice::derive("new-account"),
+        cookie: format!(
+            "sessionid=offline; sid_tt=offline; sid_guard=offline%7C{now}%7C5184000%7Cfuture; d_ticket=offline"
+        ),
+        uid: uid.into(),
+        sec_uid: "MS4wLjABAAAA-native-import-api".into(),
+        nickname: "原生导入账号".into(),
+        avatar_url: String::new(),
+        mobile: String::new(),
+        session_key: None,
+        d_ticket: None,
+        x_tt_token: Some("offline-x-tt-token".into()),
+        token_encrypted: None,
+        ts_sign: None,
+        attest_ts_sign: None,
+        mfa_token: None,
+        guard_key_hex: None,
+        guard_server_data: None,
+        dtrait_pk1_pem: None,
+        dtrait_version: None,
+        logged_in_at: now,
+        last_verified_at: None,
+        last_beat_at: None,
+    };
+    let session_payload = serde_json::json!({
+        "account_id": "",
+        "alias": "新导入账号",
+        "device": session.device,
+        "cookie": session.cookie,
+        "uid": session.uid,
+        "sec_uid": session.sec_uid,
+        "nickname": session.nickname,
+        "avatar_url": session.avatar_url,
+        "mobile": session.mobile,
+        "session_key": session.session_key,
+        "d_ticket": session.d_ticket,
+        "x_tt_token": session.x_tt_token,
+        "token_encrypted": session.token_encrypted,
+        "ts_sign": session.ts_sign,
+        "attest_ts_sign": session.attest_ts_sign,
+        "mfa_token": session.mfa_token,
+        "logged_in_at": session.logged_in_at,
+        "last_verified_at": session.last_verified_at,
+        "last_beat_at": session.last_beat_at
+    });
+    let payload = serde_json::json!({
+        "session": session_payload,
+        "skip_web_bootstrap": true
+    });
+    let response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/accounts/native-import")
+                .header("X-API-Key", api_key)
+                .header("Content-Type", "application/json")
+                .body(Body::from(payload.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let json: Value = serde_json::from_slice(&body).unwrap();
+    let account_id = json["data"]["account_id"].as_str().unwrap();
+    assert!(account_id.starts_with("acc_"));
+    assert_eq!(json["data"]["uid"], uid);
+    assert!(db::get_account(&pool, account_id).await.unwrap().is_some());
+
+    let duplicate = router
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/accounts/native-import")
+                .header("X-API-Key", api_key)
+                .header("Content-Type", "application/json")
+                .body(Body::from(payload.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(duplicate.status(), StatusCode::BAD_REQUEST);
+    let body = to_bytes(duplicate.into_body(), usize::MAX).await.unwrap();
+    let json: Value = serde_json::from_slice(&body).unwrap();
+    assert!(json["message"].as_str().unwrap().contains("已绑定其他"));
 }
 
 #[tokio::test]
@@ -176,7 +516,10 @@ async fn test_manual_run_account_and_run_all_do_not_trigger_bark() {
 
     let pool = db::init_pool("sqlite::memory:").await.unwrap();
     let secret_box = SecretBox::new(&[18u8; 32]);
-    let notifier = BarkNotifier::new(format!("http://127.0.0.1:{port}"), Some("test_bark_key".into()));
+    let notifier = BarkNotifier::new(
+        format!("http://127.0.0.1:{port}"),
+        Some("test_bark_key".into()),
+    );
     let engine = Arc::new(SparkEngine::new(
         pool.clone(),
         secret_box.clone(),
@@ -188,12 +531,13 @@ async fn test_manual_run_account_and_run_all_do_not_trigger_bark() {
     ));
 
     let valid_api_key = "sk_test_manual_run_123".to_string();
-    let state = AppState {
-        pool: pool.clone(),
-        secret_box: secret_box.clone(),
+    let state = AppState::new(
+        pool.clone(),
+        secret_box.clone(),
         engine,
-        api_key: Arc::new(valid_api_key.clone()),
-    };
+        Arc::new(valid_api_key.clone()),
+        std::env::temp_dir(),
+    );
 
     let router = create_router(state);
 
@@ -228,8 +572,12 @@ async fn test_manual_run_account_and_run_all_do_not_trigger_bark() {
         .unwrap();
 
     assert_eq!(res.status(), StatusCode::OK);
-    let accept_result = tokio::time::timeout(std::time::Duration::from_millis(150), listener.accept()).await;
-    assert!(accept_result.is_err(), "前台手动续火花失败严禁向 Bark 发送通知");
+    let accept_result =
+        tokio::time::timeout(std::time::Duration::from_millis(150), listener.accept()).await;
+    assert!(
+        accept_result.is_err(),
+        "前台手动续火花失败严禁向 Bark 发送通知"
+    );
 
     // 2. 前台手动触发全量续火花 (POST /api/v1/system/run-all)
     let res = router
@@ -247,8 +595,12 @@ async fn test_manual_run_account_and_run_all_do_not_trigger_bark() {
         .unwrap();
 
     assert_eq!(res.status(), StatusCode::OK);
-    let accept_result = tokio::time::timeout(std::time::Duration::from_millis(150), listener.accept()).await;
-    assert!(accept_result.is_err(), "前台手动立即执行全量续火花严禁向 Bark 发送通知");
+    let accept_result =
+        tokio::time::timeout(std::time::Duration::from_millis(150), listener.accept()).await;
+    assert!(
+        accept_result.is_err(),
+        "前台手动立即执行全量续火花严禁向 Bark 发送通知"
+    );
 }
 
 #[tokio::test]
@@ -258,7 +610,10 @@ async fn test_manual_test_target_does_not_trigger_bark() {
 
     let pool = db::init_pool("sqlite::memory:").await.unwrap();
     let secret_box = SecretBox::new(&[19u8; 32]);
-    let notifier = BarkNotifier::new(format!("http://127.0.0.1:{port}"), Some("test_bark_key".into()));
+    let notifier = BarkNotifier::new(
+        format!("http://127.0.0.1:{port}"),
+        Some("test_bark_key".into()),
+    );
     let engine = Arc::new(SparkEngine::new(
         pool.clone(),
         secret_box.clone(),
@@ -270,12 +625,13 @@ async fn test_manual_test_target_does_not_trigger_bark() {
     ));
 
     let valid_api_key = "sk_test_manual_target_123".to_string();
-    let state = AppState {
-        pool: pool.clone(),
-        secret_box: secret_box.clone(),
+    let state = AppState::new(
+        pool.clone(),
+        secret_box.clone(),
         engine,
-        api_key: Arc::new(valid_api_key.clone()),
-    };
+        Arc::new(valid_api_key.clone()),
+        std::env::temp_dir(),
+    );
 
     let router = create_router(state);
 
@@ -333,19 +689,26 @@ async fn test_manual_test_target_does_not_trigger_bark() {
         .unwrap();
 
     assert_eq!(res.status(), StatusCode::INTERNAL_SERVER_ERROR);
-    let accept_result = tokio::time::timeout(std::time::Duration::from_millis(150), listener.accept()).await;
-    assert!(accept_result.is_err(), "前台手动单目标续火测试失败严禁向 Bark 发送通知");
+    let accept_result =
+        tokio::time::timeout(std::time::Duration::from_millis(150), listener.accept()).await;
+    assert!(
+        accept_result.is_err(),
+        "前台手动单目标续火测试失败严禁向 Bark 发送通知"
+    );
 }
 
 #[tokio::test]
 async fn test_bark_notifier_physical_silence_window() {
-    use std::sync::atomic::{AtomicI64, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicI64, Ordering};
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
 
-    let mut notifier = BarkNotifier::new(format!("http://127.0.0.1:{port}"), Some("test_bark_key".into()));
+    let mut notifier = BarkNotifier::new(
+        format!("http://127.0.0.1:{port}"),
+        Some("test_bark_key".into()),
+    );
     notifier.set_scheduler_alert_enabled(true);
     let silence = Arc::new(AtomicI64::new(0));
     notifier.set_silence_timestamp(silence.clone());
@@ -353,12 +716,14 @@ async fn test_bark_notifier_physical_silence_window() {
     // 1. 静默时间戳为 0（无手动操作），正常发送（会尝试连接 listener）
     let handle = tokio::spawn({
         let n = notifier.clone();
-        async move {
-            n.send_notification(None, "标题", "内容", None).await
-        }
+        async move { n.send_notification(None, "标题", "内容", None).await }
     });
-    let accept_result = tokio::time::timeout(std::time::Duration::from_millis(500), listener.accept()).await;
-    assert!(accept_result.is_ok(), "无手动操作时应正常尝试发送 Bark 推送");
+    let accept_result =
+        tokio::time::timeout(std::time::Duration::from_millis(500), listener.accept()).await;
+    assert!(
+        accept_result.is_ok(),
+        "无手动操作时应正常尝试发送 Bark 推送"
+    );
     handle.abort();
 
     // 2. 模拟前台手动操作刚刚触发（当前时间戳）
@@ -367,18 +732,21 @@ async fn test_bark_notifier_physical_silence_window() {
 
     let send_res = notifier.send_notification(None, "标题", "内容", None).await;
     assert!(send_res.is_ok(), "静默期内应直接返回 Ok(())");
-    let accept_result = tokio::time::timeout(std::time::Duration::from_millis(150), listener.accept()).await;
-    assert!(accept_result.is_err(), "静默期内（30分钟）严禁向 Bark 发送任何 HTTP 请求");
+    let accept_result =
+        tokio::time::timeout(std::time::Duration::from_millis(150), listener.accept()).await;
+    assert!(
+        accept_result.is_err(),
+        "静默期内（30分钟）严禁向 Bark 发送任何 HTTP 请求"
+    );
 
     // 3. 模拟 31 分钟前的手动操作（超出 1800 秒静默窗）
     silence.store(now - 1900, Ordering::Relaxed);
     let handle = tokio::spawn({
         let n = notifier.clone();
-        async move {
-            n.send_notification(None, "标题", "内容", None).await
-        }
+        async move { n.send_notification(None, "标题", "内容", None).await }
     });
-    let accept_result = tokio::time::timeout(std::time::Duration::from_millis(500), listener.accept()).await;
+    let accept_result =
+        tokio::time::timeout(std::time::Duration::from_millis(500), listener.accept()).await;
     assert!(accept_result.is_ok(), "静默期结束后应恢复正常发送");
     handle.abort();
 }
@@ -389,17 +757,32 @@ async fn test_bark_notifier_strict_physical_gate_outside_daily_scheduler() {
     let port = listener.local_addr().unwrap().port();
 
     // 默认创建的 notifier，scheduler_alert_enabled 为 false
-    let notifier = BarkNotifier::new(format!("http://127.0.0.1:{port}"), Some("test_bark_key".into()));
+    let notifier = BarkNotifier::new(
+        format!("http://127.0.0.1:{port}"),
+        Some("test_bark_key".into()),
+    );
 
     // 1. 在非每日任务期间，即便没有任何静默时间戳（last=0），也必须物理阻断
-    let res = notifier.send_notification(None, "手动操作通知", "内容", None).await;
+    let res = notifier
+        .send_notification(None, "手动操作通知", "内容", None)
+        .await;
     assert!(res.is_ok());
-    let accept_result = tokio::time::timeout(std::time::Duration::from_millis(150), listener.accept()).await;
-    assert!(accept_result.is_err(), "非每日定时任务期，send_notification 必须 100% 物理拦截");
+    let accept_result =
+        tokio::time::timeout(std::time::Duration::from_millis(150), listener.accept()).await;
+    assert!(
+        accept_result.is_err(),
+        "非每日定时任务期，send_notification 必须 100% 物理拦截"
+    );
 
     // 2. Cookie 失效告警在非每日任务期间也必须物理阻断
-    let res = notifier.send_cookie_expired_alert("测试账号", Some("昵称"), "Cookie 失效", None).await;
+    let res = notifier
+        .send_cookie_expired_alert("测试账号", Some("昵称"), "Cookie 失效", None)
+        .await;
     assert!(res.is_ok());
-    let accept_result = tokio::time::timeout(std::time::Duration::from_millis(150), listener.accept()).await;
-    assert!(accept_result.is_err(), "非每日定时任务期，send_cookie_expired_alert 必须 100% 物理拦截");
+    let accept_result =
+        tokio::time::timeout(std::time::Duration::from_millis(150), listener.accept()).await;
+    assert!(
+        accept_result.is_err(),
+        "非每日定时任务期，send_cookie_expired_alert 必须 100% 物理拦截"
+    );
 }

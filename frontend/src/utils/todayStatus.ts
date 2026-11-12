@@ -31,6 +31,9 @@ export function getTodaySparkStatus(target: SparkTarget, now = new Date(), _acco
   if (checkedToday && target.is_sparked_today === true) {
     return { code: 'SUCCESS', label: '今日已续 (我已发消息)', color: successColor };
   }
+  if (lastToday && target.last_status === 'PENDING') {
+    return { code: 'PENDING', label: '已提交 (待历史确认)', color: 'bg-sky-100 dark:bg-sky-950/40 text-sky-700 dark:text-sky-400 border-sky-300 dark:border-sky-800' };
+  }
   if (lastToday && target.last_status === 'FAILED') {
     return { code: 'FAILED', label: '今日发送失败', color: 'bg-rose-100 dark:bg-rose-950/40 text-rose-700 dark:text-rose-400 border-rose-300 dark:border-rose-800' };
   }

@@ -1,16 +1,19 @@
-use std::sync::Arc;
 use axum::{
+    Json,
     body::Body,
     extract::{Request, State},
     http::{HeaderMap, StatusCode},
     middleware::Next,
     response::Response,
-    Json,
 };
 use serde_json::json;
+use std::sync::Arc;
 
 pub fn extract_api_key(headers: &HeaderMap) -> Option<String> {
-    if let Some(val) = headers.get("X-API-Key").or_else(|| headers.get("x-api-key")) {
+    if let Some(val) = headers
+        .get("X-API-Key")
+        .or_else(|| headers.get("x-api-key"))
+    {
         if let Ok(s) = val.to_str() {
             let s = s.trim();
             if !s.is_empty() {
@@ -19,10 +22,16 @@ pub fn extract_api_key(headers: &HeaderMap) -> Option<String> {
         }
     }
 
-    if let Some(val) = headers.get("Authorization").or_else(|| headers.get("authorization")) {
+    if let Some(val) = headers
+        .get("Authorization")
+        .or_else(|| headers.get("authorization"))
+    {
         if let Ok(s) = val.to_str() {
             let s = s.trim();
-            if let Some(token) = s.strip_prefix("Bearer ").or_else(|| s.strip_prefix("bearer ")) {
+            if let Some(token) = s
+                .strip_prefix("Bearer ")
+                .or_else(|| s.strip_prefix("bearer "))
+            {
                 let token = token.trim();
                 if !token.is_empty() {
                     return Some(token.to_string());

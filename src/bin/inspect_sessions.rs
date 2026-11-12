@@ -17,12 +17,20 @@ async fn main() -> Result<()> {
     }
 
     let secret_box = load_or_create_master_key(Path::new(&data_dir))?;
-    let pool = SqlitePoolOptions::new().connect(&format!("sqlite://{}", db_file.display())).await?;
+    let pool = SqlitePoolOptions::new()
+        .connect(&format!("sqlite://{}", db_file.display()))
+        .await?;
 
-    let accounts: Vec<(String, String, Option<String>, Option<String>, Vec<u8>, String)> =
-        sqlx::query_as("SELECT id, alias, uid, nickname, encrypted_cookie, status FROM accounts")
-            .fetch_all(&pool)
-            .await?;
+    let accounts: Vec<(
+        String,
+        String,
+        Option<String>,
+        Option<String>,
+        Vec<u8>,
+        String,
+    )> = sqlx::query_as("SELECT id, alias, uid, nickname, encrypted_cookie, status FROM accounts")
+        .fetch_all(&pool)
+        .await?;
 
     let now = Utc::now().timestamp();
     println!("=== SESSIONS AUDIT AT UTC TIMESTAMP: {} ===", now);
@@ -45,7 +53,8 @@ async fn main() -> Result<()> {
                     "  Key Checks: sessionid={}, passport_assist_user={}, passport_csrf_token={}, s_v_web_id={}, msToken={}, d_ticket={}",
                     keys.contains(&"sessionid") || keys.contains(&"sessionid_ss"),
                     keys.contains(&"passport_assist_user"),
-                    keys.contains(&"passport_csrf_token") || keys.contains(&"passport_csrf_token_default"),
+                    keys.contains(&"passport_csrf_token")
+                        || keys.contains(&"passport_csrf_token_default"),
                     keys.contains(&"s_v_web_id"),
                     keys.contains(&"msToken"),
                     keys.contains(&"d_ticket")
@@ -59,46 +68,81 @@ async fn main() -> Result<()> {
             }
         }
 
-        let ctx_row: Option<(Vec<u8>,)> =
-            sqlx::query_as("SELECT encrypted_context FROM account_web_contexts WHERE account_id=?1")
-                .bind(&id)
-                .fetch_optional(&pool)
-                .await?;
+        let ctx_row: Option<(Vec<u8>,)> = sqlx::query_as(
+            "SELECT encrypted_context FROM account_web_contexts WHERE account_id=?1",
+        )
+        .bind(&id)
+        .fetch_optional(&pool)
+        .await?;
 
         if let Some((enc_ctx,)) = ctx_row {
             if let Ok(ctx_bytes) = secret_box.decrypt(&enc_ctx) {
                 if let Ok(ctx) = serde_json::from_slice::<Value>(&ctx_bytes) {
                     println!("  WebContext Found:");
-                    let has_guard_secret = ctx.get("guard_secret_hex").and_then(|v| v.as_str()).is_some();
-                    println!("    guard_secret_hex: {}", if has_guard_secret { "PRESENT" } else { "NONE" });
+                    let has_guard_secret = ctx
+                        .get("guard_secret_hex")
+                        .and_then(|v| v.as_str())
+                        .is_some();
+                    println!(
+                        "    guard_secret_hex: {}",
+                        if has_guard_secret { "PRESENT" } else { "NONE" }
+                    );
                     if let Some(hex) = ctx.get("guard_secret_hex").and_then(|v| v.as_str()) {
                         if let Ok(key) = sparklight::douyin::pcim_guard::GuardKey::from_hex(hex) {
                             println!("    derived public_key: {}", key.public_key_base64());
                         }
                     }
                     let guard_acquired_at = ctx.get("guard_acquired_at").and_then(|v| v.as_i64());
-                    println!("    guard_acquired_at: {:?} (age: {:?}s)", guard_acquired_at, guard_acquired_at.map(|t| now - t));
+                    println!(
+                        "    guard_acquired_at: {:?} (age: {:?}s)",
+                        guard_acquired_at,
+                        guard_acquired_at.map(|t| now - t)
+                    );
 
-                    if let Some(srv_data_str) = ctx.get("guard_server_data").and_then(|v| v.as_str()) {
+                    if let Some(srv_data_str) =
+                        ctx.get("guard_server_data").and_then(|v| v.as_str())
+                    {
                         if let Ok(sd) = serde_json::from_str::<Value>(srv_data_str) {
                             let expire_time = sd.get("expire_time").and_then(|v| v.as_i64());
                             println!("    guard_server_data:");
-                           let create_time = sd.get("create_time").and_then(|v| v.as_i64());
-                           println!("      create_time: {:?} (age: {:?}s)", create_time, create_time.map(|t| now - t));
+                            let create_time = sd.get("create_time").and_then(|v| v.as_i64());
+                            println!(
+                                "      create_time: {:?} (age: {:?}s)",
+                                create_time,
+                                create_time.map(|t| now - t)
+                            );
                             println!("      has_ticket: {}", sd.get("ticket").is_some());
                             println!("      has_ts_sign: {}", sd.get("ts_sign").is_some());
-                            println!("      client_cert: {:?}", sd.get("client_cert").map(|v| v.as_str().unwrap_or("")));
-                            println!("      expire_time: {:?} (remaining: {:?}s)", expire_time, expire_time.map(|t| t - now));
+                            println!(
+                                "      client_cert: {:?}",
+                                sd.get("client_cert").map(|v| v.as_str().unwrap_or(""))
+                            );
+                            println!(
+                                "      expire_time: {:?} (remaining: {:?}s)",
+                                expire_time,
+                                expire_time.map(|t| t - now)
+                            );
                         } else {
-                            println!("    guard_server_data: [RAW STRING LEN {}]", srv_data_str.len());
+                            println!(
+                                "    guard_server_data: [RAW STRING LEN {}]",
+                                srv_data_str.len()
+                            );
                         }
                     } else {
                         println!("    guard_server_data: NONE");
                     }
 
-                    let identity_acquired_at = ctx.get("identity_acquired_at").and_then(|v| v.as_i64());
-                    println!("    identity_acquired_at: {:?} (age: {:?}s)", identity_acquired_at, identity_acquired_at.map(|t| now - t));
-                    println!("    dtrait_pk1_pem: {}", ctx.get("dtrait_pk1_pem").is_some());
+                    let identity_acquired_at =
+                        ctx.get("identity_acquired_at").and_then(|v| v.as_i64());
+                    println!(
+                        "    identity_acquired_at: {:?} (age: {:?}s)",
+                        identity_acquired_at,
+                        identity_acquired_at.map(|t| now - t)
+                    );
+                    println!(
+                        "    dtrait_pk1_pem: {}",
+                        ctx.get("dtrait_pk1_pem").is_some()
+                    );
                     println!("    dtrait_version: {:?}", ctx.get("dtrait_version"));
                 }
             }
@@ -108,40 +152,22 @@ async fn main() -> Result<()> {
 
         if let Ok(cookie_bytes) = secret_box.decrypt(&enc_cookie) {
             if let Ok(cookie_str) = String::from_utf8(cookie_bytes) {
-                if let Ok(client) = sparklight::douyin::client::DouyinClient::new(&cookie_str, &alias) {
-                    let resp = reqwest::Client::new()
-                        .get("https://www.douyin.com/passport/account/info/v2/?aid=6383")
-                        .header(reqwest::header::COOKIE, &cookie_str)
-                        .header(reqwest::header::USER_AGENT, "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36")
-                        .send()
-                        .await;
-                    match resp {
-                        Ok(r) => {
-                            let status = r.status();
-                            let text = r.text().await.unwrap_or_default();
-                            println!("  Direct /passport/account/info/v2/ HTTP Status: {}, Body: {}", status, text);
-                        }
-                        Err(e) => println!("  Direct /passport/account/info/v2/ Error: {}", e),
-                    }
-                    let beat_resp = reqwest::Client::new()
-                        .get("https://www.douyin.com/passport/token/beat/web/?scene=boot&aid=6383")
-                        .header(reqwest::header::COOKIE, &cookie_str)
-                        .header(reqwest::header::USER_AGENT, "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36")
-                        .header("web-sdk-version", "1")
-                        .send()
-                        .await;
-                    match beat_resp {
-                        Ok(r) => {
-                            let status = r.status();
-                            let headers = format!("{:?}", r.headers());
-                            let text = r.text().await.unwrap_or_default();
-                            println!("  Direct /passport/token/beat/web/ Status: {}, Headers: {}, Body: {}", status, headers, text);
-                        }
-                        Err(e) => println!("  Direct /passport/token/beat/web/ Error: {}", e),
-                    }
-                    println!("  Executing live check_cookie for {}...", alias);
+                if let Ok(client) = sparklight::douyin::client::DouyinClient::for_account(
+                    &pool,
+                    &secret_box,
+                    &id,
+                    &cookie_str,
+                    &alias,
+                )
+                .await
+                {
+                    client
+                        .load_web_context(&pool, &secret_box, &id, uid.as_deref())
+                        .await
+                        .ok();
+                    println!("  Executing local-only check_cookie for {}...", alias);
                     let check_res = client.check_cookie().await;
-                    println!("  Live check_cookie result: {:?}", check_res);
+                    println!("  Local check_cookie result: {:?}", check_res);
                 }
             }
         }

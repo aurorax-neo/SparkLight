@@ -26,7 +26,10 @@ pub struct AccountDto {
     pub uid: Option<String>,
     pub nickname: Option<String>,
     pub avatar_url: Option<String>,
-    pub masked_cookie: String,
+    pub native_ready: bool,
+    pub native_sid_expires_at: Option<i64>,
+    pub native_last_verified_at: Option<i64>,
+    pub native_last_beat_at: Option<i64>,
     pub status: String,
     pub bark_key_override: Option<String>,
     pub targets_count: i64,
@@ -40,16 +43,9 @@ pub struct AccountDto {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CreateAccountReq {
-    pub alias: String,
-    pub cookie: String,
-    pub bark_key_override: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct UpdateAccountReq {
     pub alias: Option<String>,
-    pub cookie: Option<String>,
     pub status: Option<String>,
     pub bark_key_override: Option<String>,
 }
@@ -149,11 +145,17 @@ pub struct SystemOverview {
     pub next_schedule_time: String,
 }
 
-pub fn system_sent_today(status: Option<&str>, sent_at: Option<DateTime<Utc>>, now: DateTime<Utc>) -> bool {
+pub fn system_sent_today(
+    status: Option<&str>,
+    sent_at: Option<DateTime<Utc>>,
+    now: DateTime<Utc>,
+) -> bool {
     let cst = chrono::FixedOffset::east_opt(8 * 3600).unwrap();
-    status == Some("SUCCESS") && sent_at.is_some_and(|sent| {
-        sent <= now && sent.with_timezone(&cst).date_naive() == now.with_timezone(&cst).date_naive()
-    })
+    status == Some("SUCCESS")
+        && sent_at.is_some_and(|sent| {
+            sent <= now
+                && sent.with_timezone(&cst).date_naive() == now.with_timezone(&cst).date_naive()
+        })
 }
 
 #[cfg(test)]
@@ -161,10 +163,20 @@ mod today_tests {
     use super::*;
     #[test]
     fn system_success_requires_nonfuture_cst_today() {
-        let now = DateTime::parse_from_rfc3339("2026-10-14T16:00:01Z").unwrap().with_timezone(&Utc);
+        let now = DateTime::parse_from_rfc3339("2026-10-14T16:00:01Z")
+            .unwrap()
+            .with_timezone(&Utc);
         assert!(system_sent_today(Some("SUCCESS"), Some(now), now));
-        assert!(!system_sent_today(Some("SUCCESS"), Some(now + chrono::Duration::seconds(1)), now));
-        assert!(!system_sent_today(Some("SUCCESS"), Some(now - chrono::Duration::seconds(2)), now));
+        assert!(!system_sent_today(
+            Some("SUCCESS"),
+            Some(now + chrono::Duration::seconds(1)),
+            now
+        ));
+        assert!(!system_sent_today(
+            Some("SUCCESS"),
+            Some(now - chrono::Duration::seconds(2)),
+            now
+        ));
         assert!(!system_sent_today(Some("FAILED"), Some(now), now));
         assert!(!system_sent_today(Some("SUCCESS"), None, now));
     }

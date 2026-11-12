@@ -12,9 +12,19 @@ import {
   Flame,
   RefreshCw,
   Clock,
+  BookOpen,
+  Wand2,
+  Check,
 } from 'lucide-react';
 import { api } from '../api/client';
-import { AccountDto, DouyinFriend, SparkTarget } from '../types';
+import {
+  AccountDto,
+  DouyinFriend,
+  SparkTarget,
+  SparkTemplateItem,
+  TemplatePreviewResult,
+  TemplatesConfigDto,
+} from '../types';
 import { useToast } from '../components/ui/Toast';
 import { ConfirmModal } from '../components/ui/ConfirmModal';
 import { CustomSelect } from '../components/ui/CustomSelect';
@@ -22,7 +32,8 @@ import { ModalPortal } from '../components/ui/ModalPortal';
 import { parseSparkStatus } from '../utils/spark';
 import { accountDisplayName, formatDisplayName } from '../utils/displayName';
 import { getTodaySparkStatus } from '../utils/todayStatus';
-import { refreshSummaryMessage, refreshTargetsSequentially } from '../utils/refreshTargets';
+import { refreshSummaryMessage, refreshTargetsConcurrently } from '../utils/refreshTargets';
+import { formatBeijingDateTime, formatBeijingShortDateTime } from '../utils/datetime';
 
 interface Props {
   active?: boolean;
@@ -45,8 +56,24 @@ export const TargetsPage: React.FC<Props> = ({ active = true, refreshTrigger, on
 
   // Modals
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
+  const [isTemplateModalOpen, setIsTemplateModalOpen] = useState(false);
   const [editTarget, setEditTarget] = useState<SparkTarget | null>(null);
   const [deleteTargetItem, setDeleteTargetItem] = useState<SparkTarget | null>(null);
+
+  // Template Studio States
+  const [templatesConfig, setTemplatesConfig] = useState<TemplatesConfigDto | null>(null);
+  const [studioTemplate, setStudioTemplate] = useState('🔥 {yiyan}');
+  const [customTplName, setCustomTplName] = useState('');
+  const [customTplDesc, setCustomTplDesc] = useState('');
+  const [editingCustomId, setEditingCustomId] = useState<string | null>(null);
+  const [studioApplyScope, setStudioApplyScope] = useState<string>('');
+  const [previewResult, setPreviewResult] = useState<TemplatePreviewResult | null>(null);
+  const [isPreviewing, setIsPreviewing] = useState(false);
+  const [isApplyingTemplate, setIsApplyingTemplate] = useState(false);
+  const [modalPreviewText, setModalPreviewText] = useState('');
+  const [isModalPreviewing, setIsModalPreviewing] = useState(false);
+  const studioInputRef = useRef<HTMLInputElement | null>(null);
+  const modalInputRef = useRef<HTMLInputElement | null>(null);
 
   // Add Target Form States
   const [targetAccountId, setTargetAccountId] = useState('');
@@ -76,12 +103,17 @@ export const TargetsPage: React.FC<Props> = ({ active = true, refreshTrigger, on
   const loadData = async () => {
     const currentRequest = ++requestId.current;
     try {
-      const [accs, tgts] = await Promise.all([
-        api.getAccounts(), api.getTargets(selectedAccountId || undefined),
+      const [accs, tgts, tplCfg] = await Promise.all([
+        api.getAccounts(),
+        api.getTargets(selectedAccountId || undefined),
+        api.getTemplates().catch(() => null),
       ]);
       if (currentRequest !== requestId.current) return;
       setAccounts(accs);
       setTargets(tgts);
+      if (tplCfg) {
+        setTemplatesConfig(tplCfg);
+      }
       setNow(new Date());
     } catch (e) {
       if (currentRequest === requestId.current) toast.error(`状态加载失败：${e instanceof Error ? e.message : '请重试'}`);
@@ -106,6 +138,7 @@ export const TargetsPage: React.FC<Props> = ({ active = true, refreshTrigger, on
   useEffect(() => {
     if (active) return;
     setIsAddModalOpen(false);
+    setIsTemplateModalOpen(false);
     setEditTarget(null);
     setDeleteTargetItem(null);
   }, [active]);
@@ -123,7 +156,7 @@ export const TargetsPage: React.FC<Props> = ({ active = true, refreshTrigger, on
     try {
       const scope = selectedAccountId ? targets.filter((target) => target.account_id === selectedAccountId) : targets;
       if (!scope.length) { toast.info('当前范围没有可刷新的目标'); return; }
-      const result = await refreshTargetsSequentially(scope, refreshTargetRow);
+      const result = await refreshTargetsConcurrently(scope, refreshTargetRow, 4);
       if (result.failures.length) {
         if (result.confirmed) toast.info(refreshSummaryMessage(result));
         else toast.error(refreshSummaryMessage(result));
@@ -274,6 +307,8 @@ export const TargetsPage: React.FC<Props> = ({ active = true, refreshTrigger, on
       const res = await api.testTarget(id);
       if (res.data?.success) {
         toast.success(res.message);
+      } else if (res.data?.pending) {
+        toast.info(res.message);
       } else {
         toast.error(res.message);
       }
@@ -319,14 +354,189 @@ export const TargetsPage: React.FC<Props> = ({ active = true, refreshTrigger, on
   };
 
   const handleSyncSingleTarget = async (target: SparkTarget) => {
-    if (syncBusy.current) return;
-    syncBusy.current = true;
+    if (isPageRefreshing || syncingIds.has(target.id)) return;
     try {
       const result = await refreshTargetRow(target);
       if (result.confirmed) toast.success(result.message);
       else toast.info(result.message);
     } catch (error) { toast.error(`刷新失败：${error instanceof Error ? error.message : '请求失败'}`); }
-    finally { syncBusy.current = false; }
+  };
+
+  const allAvailableTemplates: SparkTemplateItem[] = [
+    ...(templatesConfig?.presets || []).filter(
+      (preset) =>
+        !(templatesConfig?.custom_templates || []).some(
+          (custom) => custom.content.trim() === preset.content.trim(),
+        ),
+    ),
+    ...(templatesConfig?.custom_templates || []),
+  ];
+  const defaultTemplateId = allAvailableTemplates.find(
+    (tpl) => tpl.content.trim() === (templatesConfig?.default_template || '🔥').trim(),
+  )?.id;
+  const activeTemplateId =
+    editingCustomId ||
+    allAvailableTemplates.find((tpl) => tpl.content.trim() === studioTemplate.trim())?.id;
+
+  const insertAtCursor = (
+    inputEl: HTMLInputElement | null,
+    currentVal: string,
+    setter: (next: string) => void,
+    token: string,
+  ) => {
+    if (!inputEl) {
+      setter(`${currentVal}${token}`);
+      return;
+    }
+    const start = inputEl.selectionStart ?? currentVal.length;
+    const end = inputEl.selectionEnd ?? currentVal.length;
+    const next = `${currentVal.slice(0, start)}${token}${currentVal.slice(end)}`;
+    setter(next);
+    requestAnimationFrame(() => {
+      inputEl.focus();
+      const pos = start + token.length;
+      inputEl.setSelectionRange(pos, pos);
+    });
+  };
+
+  const openEditTargetModal = (tgt: SparkTarget) => {
+    setEditTarget(tgt);
+    setTargetNickname(tgt.target_nickname);
+    setRemarkName(tgt.remark_name || '');
+    setMessageTemplate(tgt.message_template);
+    setModalPreviewText('');
+    void handlePreviewInModal(
+      tgt.message_template,
+      tgt.remark_name || tgt.target_nickname,
+      tgt.spark_days,
+    );
+  };
+
+  const handlePreviewInModal = async (tpl: string, name?: string, days?: number) => {
+    setIsModalPreviewing(true);
+    try {
+      const res = await api.previewTemplate({
+        template: tpl || '🔥',
+        target_name: name || targetNickname || remarkName || '好友',
+        spark_days: days || sparkDays || 30,
+      });
+      setModalPreviewText(res.rendered);
+    } catch (e: any) {
+      toast.error(`预览失败：${e.message || '请稍后重试'}`);
+    } finally {
+      setIsModalPreviewing(false);
+    }
+  };
+
+  const handlePreviewInStudio = async (tpl?: string) => {
+    const targetTpl = (tpl ?? studioTemplate).trim() || '🔥';
+    setIsPreviewing(true);
+    try {
+      const res = await api.previewTemplate({
+        template: targetTpl,
+        target_name: '阿珍',
+        spark_days: 52,
+      });
+      setPreviewResult(res);
+    } catch (e: any) {
+      toast.error(`一言预览失败：${e.message || '请稍后重试'}`);
+    } finally {
+      setIsPreviewing(false);
+    }
+  };
+
+  const handleAddCustomTemplate = async () => {
+    const name = customTplName.trim();
+    const content = studioTemplate.trim();
+    if (!name || !content) {
+      toast.info('请填写自定义模板名称与模板内容');
+      return;
+    }
+    const currentCustom = templatesConfig?.custom_templates || [];
+    const matchedExistingId =
+      editingCustomId ||
+      currentCustom.find((item) => item.name === name || item.content === content)?.id ||
+      null;
+    const isUpdatingExisting = Boolean(
+      matchedExistingId && currentCustom.some((item) => item.id === matchedExistingId),
+    );
+    const nextCustom: SparkTemplateItem[] = isUpdatingExisting
+      ? currentCustom.map((item) =>
+          item.id === matchedExistingId
+            ? {
+                ...item,
+                name,
+                content,
+                description: customTplDesc.trim() || '自定义续火花模板',
+                builtin: false,
+              }
+            : item,
+        )
+      : [
+          ...currentCustom,
+          {
+            id: `custom_${Date.now()}`,
+            name,
+            content,
+            description: customTplDesc.trim() || '自定义续火花模板',
+            builtin: false,
+          },
+        ];
+    try {
+      const updated = await api.saveTemplates({ custom_templates: nextCustom });
+      setTemplatesConfig(updated);
+      setEditingCustomId(null);
+      setCustomTplName('');
+      setCustomTplDesc('');
+      toast.success(isUpdatingExisting ? `已更新自定义模板「${name}」` : `已新增自定义模板「${name}」`);
+    } catch (e: any) {
+      toast.error(`保存模板失败：${e.message}`);
+    }
+  };
+
+  const handleDeleteCustomTemplate = async (id: string) => {
+    const currentCustom = templatesConfig?.custom_templates || [];
+    const nextCustom = currentCustom.filter((item) => item.id !== id);
+    try {
+      const updated = await api.saveTemplates({ custom_templates: nextCustom });
+      setTemplatesConfig(updated);
+      if (editingCustomId === id) {
+        setEditingCustomId(null);
+        setCustomTplName('');
+        setCustomTplDesc('');
+      }
+      toast.success('已删除自定义模板');
+    } catch (e: any) {
+      toast.error(`删除失败：${e.message}`);
+    }
+  };
+
+  const handleApplyStudioTemplate = async (applyToTargets: boolean) => {
+    const clean = studioTemplate.trim();
+    if (!clean) {
+      toast.info('请输入或选择模板内容');
+      return;
+    }
+    setIsApplyingTemplate(true);
+    try {
+      if (applyToTargets) {
+        const res = await api.applyTemplate({
+          template: clean,
+          account_id: studioApplyScope || undefined,
+          set_as_default: true,
+        });
+        toast.success(res.message);
+        await loadData();
+      } else {
+        const updated = await api.saveTemplates({ default_template: clean });
+        setTemplatesConfig(updated);
+        toast.success('已设为新目标默认续火花模板');
+      }
+    } catch (e: any) {
+      toast.error(`操作失败：${e.message}`);
+    } finally {
+      setIsApplyingTemplate(false);
+    }
   };
 
   useEffect(() => { setPage(0); }, [selectedAccountId]);
@@ -362,8 +572,8 @@ export const TargetsPage: React.FC<Props> = ({ active = true, refreshTrigger, on
     }),
   ];
   return (
-    <div className="space-y-6">
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+    <div className="space-y-4">
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
         <div>
           <h1 className="text-xl font-bold text-slate-900 dark:text-slate-100 flex items-center gap-2">
             续火花对象
@@ -395,6 +605,27 @@ export const TargetsPage: React.FC<Props> = ({ active = true, refreshTrigger, on
           </button>
 
           <button
+            type="button"
+            onClick={() => {
+              const initialTpl =
+                templatesConfig?.default_template && templatesConfig.default_template !== '🔥'
+                  ? templatesConfig.default_template
+                  : '🔥 {yiyan}';
+              setStudioTemplate(initialTpl);
+              setStudioApplyScope(selectedAccountId || '');
+              setEditingCustomId(null);
+              setCustomTplName('');
+              setCustomTplDesc('');
+              setIsTemplateModalOpen(true);
+              void handlePreviewInStudio(initialTpl);
+            }}
+            className="flex items-center gap-1.5 px-3 py-2 text-xs font-medium rounded-xl border border-orange-200 dark:border-orange-900/60 bg-orange-50/80 dark:bg-orange-950/30 text-orange-700 dark:text-orange-300 hover:bg-orange-100 dark:hover:bg-orange-950/50 transition"
+          >
+            <BookOpen className="w-3.5 h-3.5" />
+            <span>文案模板库</span>
+          </button>
+
+          <button
             disabled={isPageRefreshing}
             onClick={() => {
               const defaultAcc = accounts[0]?.id || '';
@@ -404,7 +635,8 @@ export const TargetsPage: React.FC<Props> = ({ active = true, refreshTrigger, on
               setTargetSecUid('');
               setTargetUid('');
               setSparkDays(0);
-              setMessageTemplate('🔥');
+              setMessageTemplate(templatesConfig?.default_template || '🔥');
+              setModalPreviewText('');
               setIsManualInput(false);
               setFormError('');
               setIsAddModalOpen(true);
@@ -432,17 +664,17 @@ export const TargetsPage: React.FC<Props> = ({ active = true, refreshTrigger, on
         </div>
       ) : (
         <div className="overflow-x-auto rounded-2xl bg-white dark:bg-slate-900 border border-slate-200/80 dark:border-slate-800/80 shadow-sm">
-          <table className="min-w-[960px] w-full text-left border-collapse text-xs">
+          <table className="w-full text-left border-collapse text-xs">
             <thead>
               <tr className="border-b border-slate-200/80 dark:border-slate-800/80 bg-slate-50/75 dark:bg-slate-800/50 text-slate-500 dark:text-slate-400 font-medium">
-                <th className="py-3 px-4 whitespace-nowrap min-w-[180px]">好友 / 续火花对象</th>
-                <th className="py-3 px-4 whitespace-nowrap min-w-[110px]">所属账号</th>
-                <th className="py-3 px-4 whitespace-nowrap min-w-[110px]">火花状态</th>
-                <th className="py-3 px-4 whitespace-nowrap min-w-[150px]">今天续火状态</th>
-                <th className="py-3 px-4 whitespace-nowrap min-w-[80px]">消息模板</th>
-                <th className="py-3 px-4 whitespace-nowrap min-w-[70px]">监控</th>
-                <th className="py-3 px-4 whitespace-nowrap min-w-[130px]">最近互动</th>
-                <th className="py-3 px-4 whitespace-nowrap min-w-[150px] text-right sticky right-0 bg-slate-50/95 dark:bg-slate-800/95 shadow-[-4px_0_6px_-2px_rgba(0,0,0,0.05)]">操作</th>
+                <th className="py-2.5 px-4 whitespace-nowrap">好友 / 续火花对象</th>
+                <th className="py-2.5 px-3 whitespace-nowrap">所属账号</th>
+                <th className="py-2.5 px-3 whitespace-nowrap">火花状态</th>
+                <th className="py-2.5 px-3 whitespace-nowrap">今天续火状态</th>
+                <th className="py-2.5 px-3 whitespace-nowrap">消息模板</th>
+                <th className="py-2.5 px-3 whitespace-nowrap text-center">监控</th>
+                <th className="py-2.5 px-3 whitespace-nowrap">最近互动 (UTC+8)</th>
+                <th className="py-2.5 px-4 whitespace-nowrap text-right">操作</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100 dark:divide-slate-800/60">
@@ -451,20 +683,29 @@ export const TargetsPage: React.FC<Props> = ({ active = true, refreshTrigger, on
                 const isTesting = testingIds.has(tgt.id);
                 const isSyncing = syncingIds.has(tgt.id);
                 const todayStatus = getTodaySparkStatus(tgt, now);
+                const matchedTemplate = allAvailableTemplates.find(
+                  (item) => item.content === tgt.message_template,
+                );
+                const hasYiyan =
+                  tgt.message_template.includes('{yiyan') ||
+                  tgt.message_template.includes('{hitokoto') ||
+                  tgt.message_template.includes('{from') ||
+                  tgt.message_template === '@yiyan';
+                const accLabel = acc ? accountDisplayName(acc.nickname, acc.alias) : '未知账号';
 
                 return (
                   <tr
                     key={tgt.id}
                     className="hover:bg-slate-50/50 dark:hover:bg-slate-800/30 transition group"
                   >
-                    <td className="py-3 px-4">
-                      <div className="flex items-center gap-3 min-w-0">
+                    <td className="py-2.5 px-4">
+                      <div className="flex items-center gap-2.5 min-w-0">
                         {tgt.target_avatar ? (
                           <img
                             src={tgt.target_avatar}
                             alt=""
                             referrerPolicy="no-referrer"
-                            className="w-9 h-9 rounded-full object-cover border border-slate-200 dark:border-slate-700 shrink-0"
+                            className="w-8 h-8 rounded-full object-cover border border-slate-200 dark:border-slate-700 shrink-0"
                             onError={(e) => {
                               // 头像失效或防盗链时平滑替换为名字缩写
                               e.currentTarget.style.display = 'none';
@@ -474,14 +715,14 @@ export const TargetsPage: React.FC<Props> = ({ active = true, refreshTrigger, on
                           />
                         ) : null}
                         <div
-                          className="w-9 h-9 rounded-full bg-amber-100 dark:bg-amber-950/40 text-amber-600 dark:text-amber-400 font-bold flex items-center justify-center shrink-0"
+                          className="w-8 h-8 rounded-full bg-amber-100 dark:bg-amber-950/40 text-amber-600 dark:text-amber-400 font-bold flex items-center justify-center shrink-0"
                           style={{ display: tgt.target_avatar ? 'none' : 'flex' }}
                         >
                           {(tgt.remark_name || tgt.target_nickname).slice(0, 1)}
                         </div>
                         <div className="min-w-0 flex-1">
                           <div className="flex items-center gap-1.5 flex-wrap">
-                            <p className="font-semibold text-slate-800 dark:text-slate-200 truncate max-w-[150px] sm:max-w-[200px]" title={tgt.remark_name ? `${tgt.remark_name} (${tgt.target_nickname})` : tgt.target_nickname}>
+                            <p className="font-semibold text-slate-800 dark:text-slate-200 truncate max-w-[180px] xl:max-w-[260px]" title={tgt.remark_name ? `${tgt.remark_name} (${tgt.target_nickname})` : tgt.target_nickname}>
                               {tgt.remark_name ? (
                                 <span>
                                   {tgt.remark_name}
@@ -493,28 +734,31 @@ export const TargetsPage: React.FC<Props> = ({ active = true, refreshTrigger, on
                             </p>
                             {tgt.conversation_type === 2 && (
                               <span className="px-1.5 py-0.5 rounded text-[10px] bg-blue-100 dark:bg-blue-950/60 text-blue-700 dark:text-blue-300 font-medium shrink-0">
-                                👥 群聊
+                                群聊
                               </span>
                             )}
                           </div>
-                          <p className="font-mono text-[10px] text-slate-400 truncate max-w-[140px]" title={tgt.conversation_type === 2 ? `群ID: ${tgt.conversation_id || tgt.target_sec_uid}` : tgt.target_sec_uid}>
-                            {tgt.conversation_type === 2 ? `群ID: ${tgt.conversation_id || tgt.target_sec_uid}` : `${tgt.target_sec_uid.slice(0, 18)}...`}
+                          <p className="font-mono text-[10px] text-slate-400 truncate max-w-[180px] xl:max-w-[240px]" title={tgt.conversation_type === 2 ? `群ID: ${tgt.conversation_id || tgt.target_sec_uid}` : tgt.target_sec_uid}>
+                            {tgt.conversation_type === 2 ? `群ID: ${tgt.conversation_id || tgt.target_sec_uid}` : `${tgt.target_sec_uid.slice(0, 22)}...`}
                           </p>
                         </div>
                       </div>
                     </td>
 
-                    <td className="py-3 px-4 whitespace-nowrap">
-                      <span className="px-2 py-0.5 rounded-lg bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 font-medium">
-                        {acc ? accountDisplayName(acc.nickname, acc.alias) : '未知账号'}
+                    <td className="py-2.5 px-3 whitespace-nowrap">
+                      <span
+                        title={accLabel}
+                        className="inline-block max-w-[220px] xl:max-w-[280px] truncate align-middle px-2.5 py-0.5 rounded-lg bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 font-medium"
+                      >
+                        {accLabel}
                       </span>
                     </td>
                     {/* 火花状态 */}
-                    <td className="py-3 px-4">
+                    <td className="py-2.5 px-3 whitespace-nowrap">
                       {(() => {
                         const sparkInfo = parseSparkStatus(tgt.spark_days, tgt.spark_desc);
                         return (
-                          <span className={`inline-flex items-center gap-1 whitespace-nowrap shrink-0 font-semibold px-2.5 py-1 rounded-lg border text-xs ${sparkInfo.badgeClass}`}>
+                          <span className={`inline-flex items-center gap-1 whitespace-nowrap shrink-0 font-semibold px-2 py-1 rounded-lg border text-[11px] ${sparkInfo.badgeClass}`}>
                             <Flame className={`w-3.5 h-3.5 shrink-0 ${sparkInfo.isLit ? 'fill-current text-orange-500' : 'text-slate-400'}`} />
                             <span>{sparkInfo.label}</span>
                           </span>
@@ -523,8 +767,8 @@ export const TargetsPage: React.FC<Props> = ({ active = true, refreshTrigger, on
                     </td>
 
                     {/* 今日状态只由本目标的已确认记录决定。 */}
-                    <td className="py-3 px-4 whitespace-nowrap">
-                      <span title={todayStatus.label} className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-semibold border ${todayStatus.color}`}>
+                    <td className="py-2.5 px-3 whitespace-nowrap">
+                      <span title={todayStatus.label} className={`inline-flex items-center gap-1 px-2 py-1 rounded-full text-[11px] font-semibold border ${todayStatus.color}`}>
                         {todayStatus.code === 'SUCCESS' && <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />}
                         {todayStatus.code === 'PENDING' && <Clock className="w-3.5 h-3.5 shrink-0" />}
                         {todayStatus.code === 'FAILED' && <AlertTriangle className="w-3.5 h-3.5 shrink-0" />}
@@ -533,13 +777,25 @@ export const TargetsPage: React.FC<Props> = ({ active = true, refreshTrigger, on
                       </span>
                     </td>
 
-                    <td className="py-3 px-4">
-                      <span className="font-mono text-slate-600 dark:text-slate-300 px-2 py-0.5 rounded bg-slate-100 dark:bg-slate-800">
-                        {tgt.message_template}
-                      </span>
+                    <td className="py-2.5 px-3">
+                      <button
+                        type="button"
+                        onClick={() => openEditTargetModal(tgt)}
+                        title={`点击修改该目标文案模板\n当前内容：${tgt.message_template}`}
+                        className="inline-flex items-center gap-1.5 max-w-[240px] xl:max-w-[320px] px-2.5 py-1 rounded-lg border border-slate-200/80 dark:border-slate-700/80 bg-slate-50/80 dark:bg-slate-800/70 hover:border-orange-400 dark:hover:border-orange-700 transition text-left"
+                      >
+                        {hasYiyan && (
+                          <span className="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-orange-100 dark:bg-orange-950/60 text-orange-700 dark:text-orange-300 shrink-0">
+                            一言
+                          </span>
+                        )}
+                        <span className="text-[11px] font-medium text-slate-700 dark:text-slate-200 truncate">
+                          {matchedTemplate ? matchedTemplate.name : tgt.message_template}
+                        </span>
+                      </button>
                     </td>
 
-                    <td className="py-3 px-4">
+                    <td className="py-2.5 px-3 text-center">
                       <button
                         onClick={() => handleToggleEnabled(tgt)}
                         className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${
@@ -554,29 +810,27 @@ export const TargetsPage: React.FC<Props> = ({ active = true, refreshTrigger, on
                       </button>
                     </td>
 
-                    <td className="py-3 px-4 min-w-0">
+                    <td className="py-2.5 px-3 whitespace-nowrap max-w-[150px] overflow-hidden">
                       {tgt.last_sent_at ? (
-                        <div className="min-w-0">
-                          <p className="text-[11px] text-slate-600 dark:text-slate-300 font-mono whitespace-nowrap">
-                            {new Date(tgt.last_sent_at).toLocaleDateString()}{' '}
-                            {new Date(tgt.last_sent_at).toLocaleTimeString([], {
-                              hour: '2-digit',
-                              minute: '2-digit',
-                            })}
+                        <div className="min-w-0 max-w-[140px]">
+                          <p
+                            title={`${formatBeijingDateTime(tgt.last_sent_at)} (UTC+8)`}
+                            className="text-[11px] text-slate-600 dark:text-slate-300 font-mono whitespace-nowrap"
+                          >
+                            {formatBeijingShortDateTime(tgt.last_sent_at)}
                           </p>
-                          {tgt.last_error && (
-                            <p className="text-[10px] text-rose-500 truncate max-w-[140px]" title={tgt.last_error}>
+                          {tgt.last_error && tgt.last_status === 'FAILED' && todayStatus.code !== 'SUCCESS' && (
+                            <p className="text-[10px] text-rose-500 truncate" title={tgt.last_error}>
                               {tgt.last_error}
                             </p>
                           )}
                         </div>
                       ) : (
-                        <span className="text-slate-400 whitespace-nowrap">暂无系统发送记录</span>
+                        <span className="text-slate-400 whitespace-nowrap">暂无记录</span>
                       )}
                     </td>
 
-                    {/* Operations with Sticky Column on Right */}
-                    <td className="py-3 px-4 text-right sticky right-0 bg-white dark:bg-slate-900 group-hover:bg-slate-50/95 dark:group-hover:bg-slate-800/95 shadow-[-4px_0_6px_-2px_rgba(0,0,0,0.05)] transition-colors">
+                    <td className="py-2.5 px-4 text-right whitespace-nowrap">
                       <div className="flex items-center justify-end gap-1 shrink-0 whitespace-nowrap">
                         <button
                           onClick={() => handleSyncSingleTarget(tgt)}
@@ -598,12 +852,7 @@ export const TargetsPage: React.FC<Props> = ({ active = true, refreshTrigger, on
                         </button>
 
                         <button
-                          onClick={() => {
-                            setEditTarget(tgt);
-                            setTargetNickname(tgt.target_nickname);
-                            setRemarkName(tgt.remark_name || '');
-                            setMessageTemplate(tgt.message_template);
-                          }}
+                          onClick={() => openEditTargetModal(tgt)}
                           className="p-1.5 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800"
                           title="修改配置"
                         >
@@ -750,17 +999,73 @@ export const TargetsPage: React.FC<Props> = ({ active = true, refreshTrigger, on
                 </div>
 
                 <div>
-                  <label className="block text-xs font-medium text-slate-700 dark:text-slate-300 mb-1">
-                    发送文案模板
-                  </label>
+                  <div className="flex items-center justify-between mb-1">
+                    <label className="block text-xs font-medium text-slate-700 dark:text-slate-300">
+                      发送文案模板
+                    </label>
+                    <button
+                      type="button"
+                      disabled={isModalPreviewing}
+                      onClick={() => void handlePreviewInModal(messageTemplate)}
+                      className="inline-flex items-center gap-1 text-[11px] text-orange-600 dark:text-orange-400 hover:underline disabled:opacity-50"
+                    >
+                      {isModalPreviewing ? <Loader2 className="w-3 h-3 animate-spin" /> : <Wand2 className="w-3 h-3" />}
+                      <span>预览一言</span>
+                    </button>
+                  </div>
                   <input
+                    ref={modalInputRef}
                     type="text"
                     value={messageTemplate}
                     onChange={(e) => setMessageTemplate(e.target.value)}
-                    placeholder="默认 🔥"
+                    placeholder="支持 {yiyan}、{from}、{days}、{name}"
                     className="w-full px-3 py-2 text-xs rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-100 focus:ring-2 focus:ring-orange-500 focus:outline-none"
                   />
                 </div>
+              </div>
+
+              <div className="space-y-2 rounded-xl bg-slate-50 dark:bg-slate-800/60 p-2.5 border border-slate-200/70 dark:border-slate-800">
+                <div className="flex flex-wrap gap-1.5">
+                  {allAvailableTemplates.map((tpl) => (
+                    <button
+                      key={tpl.id}
+                      type="button"
+                      onClick={() => {
+                        setMessageTemplate(tpl.content);
+                        void handlePreviewInModal(tpl.content);
+                      }}
+                      className={`px-2 py-1 rounded-lg text-[11px] font-medium border transition ${
+                        messageTemplate === tpl.content
+                          ? 'border-orange-500 bg-orange-500 text-white'
+                          : 'border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-300 hover:border-orange-400'
+                      }`}
+                    >
+                      {tpl.name}
+                    </button>
+                  ))}
+                </div>
+                <div className="flex flex-wrap items-center gap-1">
+                  <span className="text-[10px] text-slate-400 mr-1">插入变量:</span>
+                  {(templatesConfig?.variables || []).map((v) => (
+                    <button
+                      key={v.token}
+                      type="button"
+                      title={`${v.label}（示例：${v.example}）`}
+                      onClick={() =>
+                        insertAtCursor(modalInputRef.current, messageTemplate, setMessageTemplate, v.token)
+                      }
+                      className="px-1.5 py-0.5 rounded bg-slate-200/70 dark:bg-slate-700/70 text-[10px] font-mono text-slate-700 dark:text-slate-200 hover:bg-orange-100 dark:hover:bg-orange-950/50"
+                    >
+                      {v.token}
+                    </button>
+                  ))}
+                </div>
+                {modalPreviewText && (
+                  <div className="text-[11px] text-slate-600 dark:text-slate-300 bg-white dark:bg-slate-900 rounded-lg px-2.5 py-1.5 border border-slate-200/80 dark:border-slate-800">
+                    <span className="text-slate-400 mr-1">发送预览:</span>
+                    <span className="font-medium text-slate-800 dark:text-slate-100">{modalPreviewText}</span>
+                  </div>
+                )}
               </div>
 
               {formError && <p className="text-xs text-rose-500">{formError}</p>}
@@ -847,17 +1152,83 @@ export const TargetsPage: React.FC<Props> = ({ active = true, refreshTrigger, on
                 </div>
 
                 <div>
-                  <label className="block text-xs font-medium text-slate-700 dark:text-slate-300 mb-1">
-                    发送文案模板
-                  </label>
+                  <div className="flex items-center justify-between mb-1">
+                    <label className="block text-xs font-medium text-slate-700 dark:text-slate-300">
+                      发送文案模板
+                    </label>
+                    <button
+                      type="button"
+                      disabled={isModalPreviewing}
+                      onClick={() =>
+                        void handlePreviewInModal(
+                          messageTemplate,
+                          remarkName || editTarget.target_nickname,
+                          editTarget.spark_days,
+                        )
+                      }
+                      className="inline-flex items-center gap-1 text-[11px] text-orange-600 dark:text-orange-400 hover:underline disabled:opacity-50"
+                    >
+                      {isModalPreviewing ? <Loader2 className="w-3 h-3 animate-spin" /> : <Wand2 className="w-3 h-3" />}
+                      <span>预览一言</span>
+                    </button>
+                  </div>
                   <input
+                    ref={modalInputRef}
                     type="text"
                     value={messageTemplate}
                     onChange={(e) => setMessageTemplate(e.target.value)}
-                    placeholder="默认 🔥"
+                    placeholder="支持 {yiyan}、{from}、{days}、{name}"
                     className="w-full px-3 py-2 text-xs rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-100 focus:ring-2 focus:ring-orange-500 focus:outline-none"
                   />
                 </div>
+              </div>
+
+              <div className="space-y-2 rounded-xl bg-slate-50 dark:bg-slate-800/60 p-2.5 border border-slate-200/70 dark:border-slate-800">
+                <div className="flex flex-wrap gap-1.5">
+                  {allAvailableTemplates.map((tpl) => (
+                    <button
+                      key={tpl.id}
+                      type="button"
+                      onClick={() => {
+                        setMessageTemplate(tpl.content);
+                        void handlePreviewInModal(
+                          tpl.content,
+                          remarkName || editTarget.target_nickname,
+                          editTarget.spark_days,
+                        );
+                      }}
+                      className={`px-2 py-1 rounded-lg text-[11px] font-medium border transition ${
+                        messageTemplate === tpl.content
+                          ? 'border-orange-500 bg-orange-500 text-white'
+                          : 'border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-300 hover:border-orange-400'
+                      }`}
+                    >
+                      {tpl.name}
+                    </button>
+                  ))}
+                </div>
+                <div className="flex flex-wrap items-center gap-1">
+                  <span className="text-[10px] text-slate-400 mr-1">插入变量:</span>
+                  {(templatesConfig?.variables || []).map((v) => (
+                    <button
+                      key={v.token}
+                      type="button"
+                      title={`${v.label}（示例：${v.example}）`}
+                      onClick={() =>
+                        insertAtCursor(modalInputRef.current, messageTemplate, setMessageTemplate, v.token)
+                      }
+                      className="px-1.5 py-0.5 rounded bg-slate-200/70 dark:bg-slate-700/70 text-[10px] font-mono text-slate-700 dark:text-slate-200 hover:bg-orange-100 dark:hover:bg-orange-950/50"
+                    >
+                      {v.token}
+                    </button>
+                  ))}
+                </div>
+                {modalPreviewText && (
+                  <div className="text-[11px] text-slate-600 dark:text-slate-300 bg-white dark:bg-slate-900 rounded-lg px-2.5 py-1.5 border border-slate-200/80 dark:border-slate-800">
+                    <span className="text-slate-400 mr-1">发送预览:</span>
+                    <span className="font-medium text-slate-800 dark:text-slate-100">{modalPreviewText}</span>
+                  </div>
+                )}
               </div>
 
               <div className="flex gap-2.5 pt-2">
@@ -893,6 +1264,259 @@ export const TargetsPage: React.FC<Props> = ({ active = true, refreshTrigger, on
         onConfirm={handleDeleteTargetConfirm}
         onCancel={() => setDeleteTargetItem(null)}
       />
+
+      {/* Template Studio Modal */}
+      {isTemplateModalOpen && (
+        <ModalPortal>
+          <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/60 backdrop-blur-sm p-4 overflow-y-auto">
+            <div className="relative w-full max-w-4xl rounded-2xl bg-white dark:bg-slate-900 p-6 shadow-2xl border border-slate-200 dark:border-slate-800 space-y-4">
+              <button
+                onClick={() => setIsTemplateModalOpen(false)}
+                className="absolute right-4 top-4 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200"
+              >
+                <X className="w-5 h-5" />
+              </button>
+
+              <div>
+                <h3 className="text-base font-bold text-slate-900 dark:text-slate-100 flex items-center gap-2">
+                  <BookOpen className="w-4 h-4 text-orange-500" />
+                  <span>每日续火花文案模板系统</span>
+                </h3>
+                <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
+                  已接入 iTab 每日一言随机接口，支持动态变量组合、多候选随机抽取（用 || 分隔）与一键批量应用
+                </p>
+              </div>
+
+              {/* Preset & Custom Templates Grid */}
+              <div className="space-y-2">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-semibold text-slate-700 dark:text-slate-300">
+                    可选模板（点击载入预览，自定义模板可直接编辑更新）
+                  </span>
+                  <span className="text-[11px] text-slate-400">
+                    当前默认：{templatesConfig?.default_template || '🔥'}
+                  </span>
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2.5 max-h-56 overflow-y-auto pr-1">
+                  {allAvailableTemplates.map((tpl) => {
+                    const active = tpl.id === activeTemplateId;
+                    const isDefault = tpl.id === defaultTemplateId;
+                    return (
+                      <div
+                        key={tpl.id}
+                        onClick={() => {
+                          setStudioTemplate(tpl.content);
+                          if (!tpl.builtin) {
+                            setEditingCustomId(tpl.id);
+                            setCustomTplName(tpl.name);
+                            setCustomTplDesc(tpl.description);
+                          } else {
+                            setEditingCustomId(null);
+                          }
+                          void handlePreviewInStudio(tpl.content);
+                        }}
+                        className={`cursor-pointer rounded-xl border p-2.5 transition flex items-start justify-between gap-2 ${
+                          active
+                            ? 'border-orange-500 bg-orange-50/70 dark:bg-orange-950/30'
+                            : 'border-slate-200 dark:border-slate-800 hover:border-orange-300 dark:hover:border-orange-800'
+                        }`}
+                      >
+                        <div className="min-w-0 flex-1">
+                          <div className="flex items-center gap-1.5">
+                            <span className="text-xs font-semibold text-slate-800 dark:text-slate-100">
+                              {tpl.name}
+                            </span>
+                            {isDefault && (
+                              <span className="px-1.5 py-0.2 rounded text-[10px] font-semibold bg-emerald-100 dark:bg-emerald-950/50 text-emerald-700 dark:text-emerald-400">
+                                默认
+                              </span>
+                            )}
+                            {!tpl.builtin && (
+                              <span className="px-1.5 py-0.2 rounded text-[10px] bg-slate-100 dark:bg-slate-800 text-slate-500">
+                                自定义
+                              </span>
+                            )}
+                          </div>
+                          <p className="font-mono text-[11px] text-orange-600 dark:text-orange-400 truncate mt-0.5">
+                            {tpl.content}
+                          </p>
+                          <p className="text-[10px] text-slate-400 truncate mt-0.5">
+                            {tpl.description}
+                          </p>
+                        </div>
+                        {!tpl.builtin && (
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              void handleDeleteCustomTemplate(tpl.id);
+                            }}
+                            className="p-1 text-slate-400 hover:text-rose-500 rounded"
+                            title="删除自定义模板"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* Editor & Variables */}
+              <div className="space-y-2 rounded-xl bg-slate-50 dark:bg-slate-800/50 p-3.5 border border-slate-200/80 dark:border-slate-800">
+                <div className="flex items-center justify-between">
+                  <label className="text-xs font-semibold text-slate-700 dark:text-slate-300">
+                    编辑模板内容
+                  </label>
+                  <button
+                    type="button"
+                    disabled={isPreviewing}
+                    onClick={() => void handlePreviewInStudio()}
+                    className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-medium bg-orange-500 hover:bg-orange-600 text-white transition disabled:opacity-50"
+                  >
+                    {isPreviewing ? (
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    ) : (
+                      <Wand2 className="w-3.5 h-3.5" />
+                    )}
+                    <span>换一句一言预览</span>
+                  </button>
+                </div>
+
+                <input
+                  ref={studioInputRef}
+                  type="text"
+                  value={studioTemplate}
+                  onChange={(e) => setStudioTemplate(e.target.value)}
+                  placeholder="例如：🔥 {yiyan} —— {from}"
+                  className="w-full px-3 py-2 text-xs font-mono rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 focus:ring-2 focus:ring-orange-500 focus:outline-none"
+                />
+
+                <div className="flex flex-wrap items-center gap-1.5 pt-1">
+                  <span className="text-[11px] text-slate-400">点击插入变量:</span>
+                  {(templatesConfig?.variables || []).map((v) => (
+                    <button
+                      key={v.token}
+                      type="button"
+                      onClick={() =>
+                        insertAtCursor(studioInputRef.current, studioTemplate, setStudioTemplate, v.token)
+                      }
+                      className="px-2 py-0.5 rounded-md bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 text-[11px] font-mono text-slate-700 dark:text-slate-300 hover:border-orange-400"
+                    >
+                      {v.token} <span className="text-slate-400 font-sans">({v.label})</span>
+                    </button>
+                  ))}
+                  <button
+                    type="button"
+                    onClick={() =>
+                      insertAtCursor(studioInputRef.current, studioTemplate, setStudioTemplate, ' || ')
+                    }
+                    className="px-2 py-0.5 rounded-md bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 text-[11px] font-mono text-slate-700 dark:text-slate-300 hover:border-orange-400"
+                  >
+                    || <span className="text-slate-400 font-sans">(多候选随机分隔)</span>
+                  </button>
+                </div>
+
+                {/* Live Preview Output */}
+                {previewResult && (
+                  <div className="mt-2 rounded-xl bg-white dark:bg-slate-900 border border-orange-200/80 dark:border-orange-900/50 p-3 space-y-1">
+                    <div className="flex items-center justify-between text-[11px] text-slate-400">
+                      <span>实时渲染结果（示例好友：阿珍 · 52天）</span>
+                      {previewResult.quote && (
+                        <span>出处：{previewResult.quote.from}</span>
+                      )}
+                    </div>
+                    <p className="text-xs font-medium text-slate-900 dark:text-slate-100 break-words">
+                      {previewResult.rendered}
+                    </p>
+                  </div>
+                )}
+
+                {/* Save as Custom Template */}
+                <div className="pt-2 border-t border-slate-200/70 dark:border-slate-700/60 flex flex-col sm:flex-row gap-2">
+                  <input
+                    type="text"
+                    value={customTplName}
+                    onChange={(e) => setCustomTplName(e.target.value)}
+                    placeholder="自定义模板名称（如：早安一言）"
+                    className="sm:w-44 px-2.5 py-1.5 text-xs rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900"
+                  />
+                  <input
+                    type="text"
+                    value={customTplDesc}
+                    onChange={(e) => setCustomTplDesc(e.target.value)}
+                    placeholder="备注说明（可选）"
+                    className="flex-1 px-2.5 py-1.5 text-xs rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900"
+                  />
+                  {editingCustomId && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setEditingCustomId(null);
+                        setCustomTplName('');
+                        setCustomTplDesc('');
+                      }}
+                      className="px-2.5 py-1.5 text-xs text-slate-500 rounded-lg border border-slate-200 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800 shrink-0"
+                    >
+                      取消编辑
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => void handleAddCustomTemplate()}
+                    className="px-3 py-1.5 text-xs font-medium rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 hover:bg-slate-100 dark:hover:bg-slate-800 shrink-0"
+                  >
+                    {editingCustomId ? '保存自定义模板修改' : '+ 存为自定义模板'}
+                  </button>
+                </div>
+              </div>
+
+              {/* Action Buttons */}
+              <div className="space-y-2.5 pt-1">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs">
+                  <span className="text-slate-500 dark:text-slate-400">
+                    批量应用范围：
+                  </span>
+                  <div className="w-full sm:w-56">
+                    <CustomSelect
+                      options={accountFilterOptions}
+                      value={studioApplyScope}
+                      onChange={(val) => setStudioApplyScope(val)}
+                      placeholder="选择应用范围"
+                    />
+                  </div>
+                </div>
+                <div className="flex flex-col sm:flex-row gap-2.5">
+                  <button
+                    type="button"
+                    disabled={isApplyingTemplate}
+                    onClick={() => void handleApplyStudioTemplate(false)}
+                    className="flex-1 px-4 py-2 text-xs font-medium rounded-xl border border-slate-200 dark:border-slate-800 hover:bg-slate-100 dark:hover:bg-slate-800 transition disabled:opacity-50"
+                  >
+                    仅设为新目标默认模板
+                  </button>
+                  <button
+                    type="button"
+                    disabled={isApplyingTemplate}
+                    onClick={() => void handleApplyStudioTemplate(true)}
+                    className="flex-1 flex items-center justify-center gap-1.5 px-4 py-2 text-xs font-medium rounded-xl bg-orange-500 hover:bg-orange-600 text-white transition disabled:opacity-50"
+                  >
+                    {isApplyingTemplate ? (
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    ) : (
+                      <Check className="w-3.5 h-3.5" />
+                    )}
+                    <span>
+                      设为默认并应用到{studioApplyScope ? '所选账号' : '全部'}目标 ({studioApplyScope ? targets.filter((t) => t.account_id === studioApplyScope).length : targets.length})
+                    </span>
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </ModalPortal>
+      )}
     </div>
   );
 };

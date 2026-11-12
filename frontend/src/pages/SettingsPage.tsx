@@ -124,7 +124,7 @@ export const SettingsPage: React.FC<Props> = ({ onApiKeyUpdated }) => {
 
   if (isLoading) {
     return (
-      <div className="space-y-6 max-w-4xl" aria-busy="true">
+      <div className="space-y-4" aria-busy="true">
         <div>
           <h1 className="text-xl font-bold text-slate-900 dark:text-slate-100">系统配置</h1>
           <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">管理 Bark 实时推送告警、每日续火花执行计划、失败重试次数及安全认证</p>
@@ -137,7 +137,7 @@ export const SettingsPage: React.FC<Props> = ({ onApiKeyUpdated }) => {
   }
 
   return (
-    <div className="space-y-6 max-w-4xl">
+    <div className="space-y-4">
       <div>
         <h1 className="text-xl font-bold text-slate-900 dark:text-slate-100 flex items-center gap-2">
           系统配置
@@ -218,7 +218,7 @@ export const SettingsPage: React.FC<Props> = ({ onApiKeyUpdated }) => {
               <div>
                 <h2 className="text-sm font-semibold text-slate-900 dark:text-slate-100">Bark 告警通知</h2>
                 <p className="text-xs text-slate-500 dark:text-slate-400">
-                  Cookie 凭证失效、或自动重试失败达最大上限时即时推送到 iOS 设备
+                  登录态失效、或自动重试失败达最大上限时即时推送到 iOS 设备
                 </p>
               </div>
             </div>
@@ -290,7 +290,7 @@ export const SettingsPage: React.FC<Props> = ({ onApiKeyUpdated }) => {
           <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
             <div>
               <label className="block text-xs font-medium text-slate-700 dark:text-slate-300 mb-1">
-                每日执行时间 (HH:mm)
+                每日执行时间 (北京时间 HH:mm)
               </label>
               <input
                 type="text"

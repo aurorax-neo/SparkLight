@@ -1,50 +1,118 @@
 use axum::{
+    Json,
     extract::{Path, State},
     http::StatusCode,
     response::IntoResponse,
-    Json,
 };
 use chrono::Utc;
 use serde_json::json;
 
 use crate::{
-    crypto::mask_cookie,
     db,
     douyin::client::DouyinClient,
-    model::{Account, AccountDto, CreateAccountReq, UpdateAccountReq},
+    model::{Account, AccountDto, UpdateAccountReq},
     server::AppState,
 };
 
-/// 只读本地存储，不请求平台、不消费一次性发送凭证。
-async fn local_im_history_status(state: &AppState, account: &Account, cookie: &str) -> Result<(&'static str, Option<i64>), sqlx::Error> {
-    let encrypted: Option<Vec<u8>> = sqlx::query_scalar("SELECT encrypted_context FROM account_web_contexts WHERE account_id=?1")
-        .bind(&account.id).fetch_optional(&state.pool).await?;
-    let Some(encrypted) = encrypted else { return Ok(("MISSING", None)); };
-    let context = state.secret_box.decrypt(&encrypted).ok().and_then(|bytes|
-        serde_json::from_slice::<crate::douyin::im_auth::WebSessionContext>(&bytes).ok());
-    Ok(context.map_or(("INVALID", None), |context|
-        context.history_status(account.uid.as_deref(), cookie, Utc::now().timestamp())))
+struct NativeSessionStatus {
+    ready: bool,
+    sid_expires_at: Option<i64>,
+    last_verified_at: Option<i64>,
+    last_beat_at: Option<i64>,
 }
 
+/// 原生登录状态必须来自可解密、可校验的会话快照，不能只看数据表是否存在一行。
+async fn native_session_status(
+    state: &AppState,
+    account_id: &str,
+) -> Result<NativeSessionStatus, sqlx::Error> {
+    let native = db::load_native_session(&state.pool, &state.secret_box, account_id)
+        .await
+        .map_err(|error| sqlx::Error::Protocol(error.to_string()))?;
+    let Some(native) = native else {
+        return Ok(NativeSessionStatus {
+            ready: false,
+            sid_expires_at: None,
+            last_verified_at: None,
+            last_beat_at: None,
+        });
+    };
+    let sid_expires_at = native.sid_expiry();
+    Ok(NativeSessionStatus {
+        ready: sid_expires_at.is_some_and(|expiry| expiry > Utc::now().timestamp()),
+        sid_expires_at,
+        last_verified_at: native.last_verified_at,
+        last_beat_at: native.last_beat_at,
+    })
+}
+
+/// 只读本地存储，不请求平台、不消费一次性发送凭证。
+async fn local_im_history_status(
+    state: &AppState,
+    account: &Account,
+    cookie: &str,
+) -> Result<(&'static str, Option<i64>), sqlx::Error> {
+    let encrypted: Option<Vec<u8>> = sqlx::query_scalar(
+        "SELECT encrypted_context FROM account_web_contexts WHERE account_id=?1",
+    )
+    .bind(&account.id)
+    .fetch_optional(&state.pool)
+    .await?;
+    let Some(encrypted) = encrypted else {
+        return Ok(("MISSING", None));
+    };
+    let context = state.secret_box.decrypt(&encrypted).ok().and_then(|bytes| {
+        serde_json::from_slice::<crate::douyin::im_auth::WebSessionContext>(&bytes).ok()
+    });
+    Ok(context.map_or(("INVALID", None), |context| {
+        context.history_status(account.uid.as_deref(), cookie, Utc::now().timestamp())
+    }))
+}
 pub async fn list_accounts(
     State(state): State<AppState>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
-    let accounts = db::list_accounts(&state.pool).await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"code": 500, "message": e.to_string()}))))?;
+    let accounts = db::list_accounts(&state.pool).await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"code": 500, "message": e.to_string()})),
+        )
+    })?;
 
     let mut dtos = Vec::with_capacity(accounts.len());
     for acc in accounts {
-        let plaintext = state.secret_box.decrypt(&acc.encrypted_cookie)
+        let plaintext = state
+            .secret_box
+            .decrypt(&acc.encrypted_cookie)
             .map(|b| String::from_utf8_lossy(&b).to_string())
             .unwrap_or_default();
-        let masked = mask_cookie(&plaintext);
 
-        let targets = db::list_targets(&state.pool, Some(&acc.id)).await.unwrap_or_default();
+        let targets = db::list_targets(&state.pool, Some(&acc.id))
+            .await
+            .unwrap_or_default();
         let total_targets = targets.len() as i64;
         let active_targets = targets.iter().filter(|t| t.is_enabled).count() as i64;
         let display_alias = acc.alias.clone();
-        let (im_status, im_expires) = local_im_history_status(&state, &acc, &plaintext).await
-            .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"code":500,"message":"IM 凭证状态读取失败"}))))?;
+        let (im_status, im_expires) = local_im_history_status(&state, &acc, &plaintext)
+            .await
+            .map_err(|_| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"code":500,"message":"IM 凭证状态读取失败"})),
+                )
+            })?;
+        let native = native_session_status(&state, &acc.id).await.map_err(|_| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"code":500,"message":"原生登录会话状态读取失败"})),
+            )
+        })?;
+        // 历史 Web 上下文只在原生会话有效时才有意义。旧 Web Cookie 单独存在时
+        // 不能继续对外显示 AVAILABLE，否则会让界面看起来仍然可以执行发送。
+        let (im_status, im_expires) = if native.ready {
+            (im_status, im_expires)
+        } else {
+            ("MISSING", None)
+        };
 
         dtos.push(AccountDto {
             id: acc.id,
@@ -53,7 +121,10 @@ pub async fn list_accounts(
             uid: acc.uid,
             nickname: acc.nickname,
             avatar_url: acc.avatar_url,
-            masked_cookie: masked,
+            native_ready: native.ready,
+            native_sid_expires_at: native.sid_expires_at,
+            native_last_verified_at: native.last_verified_at,
+            native_last_beat_at: native.last_beat_at,
             status: acc.status,
             bark_key_override: acc.bark_key_override,
             targets_count: total_targets,
@@ -71,127 +142,55 @@ pub async fn list_accounts(
         "data": dtos
     })))
 }
-
-pub async fn create_account(
-    State(state): State<AppState>,
-    Json(req): Json<CreateAccountReq>,
-) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
-    state.engine.record_manual_action();
-    let cookie_raw = req.cookie.trim();
-    if cookie_raw.is_empty() {
-        return Err((StatusCode::BAD_REQUEST, Json(json!({"code": 400, "message": "Cookie 不能为空"}))));
-    }
-
-    let parsed = crate::douyin::client::parse_credential_full(cookie_raw);
-    let cleaned_cookie = parsed.cookie;
-    let guard_opt = parsed.guard;
-    if !cleaned_cookie.contains("sessionid=") && !cleaned_cookie.contains("sessionid_ss=") && !cleaned_cookie.contains("sid_tt=") {
-        return Err((StatusCode::BAD_REQUEST, Json(json!({
-            "code": 400,
-            "message": "添加失败：Cookie 中缺少关键凭证 sessionid！推荐在已登录抖音页面使用 SparkLight 油猴脚本(v2.2.0)点击「⚡ 复制 SparkLight 全量凭证」后直接粘贴导入。"
-        }))));
-    }
-
-    // Encrypt cookie before storing
-    let encrypted = state.secret_box.encrypt(cleaned_cookie.as_bytes())
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"code": 500, "message": format!("加密 Cookie 失败: {e}")}))))?;
-
-    // Probe cookie validity immediately
-    let initial_alias = if req.alias.trim().is_empty() { "抖音账号" } else { req.alias.trim() };
-    let client = DouyinClient::new(&cleaned_cookie, initial_alias)
-        .map_err(|e| (StatusCode::BAD_REQUEST, Json(json!({"code": 400, "message": format!("Cookie 格式无效: {e}")}))))?;
-    let check_res = client.check_cookie().await;
-    let (status, sec_uid, uid, nickname, avatar_url) = match check_res {
-        crate::douyin::types::CheckCookieResult::Valid(profile) => (
-            "ACTIVE".to_string(),
-            Some(profile.sec_uid),
-            Some(profile.uid).or(parsed.uid.clone()),
-            Some(profile.nickname).or(parsed.nickname.clone()),
-            Some(profile.avatar_url),
-        ),
-        crate::douyin::types::CheckCookieResult::Expired(_)
-        | crate::douyin::types::CheckCookieResult::NeedVerify(_)
-        | crate::douyin::types::CheckCookieResult::NetworkError(_) => (
-            "EXPIRED".to_string(),
-            None,
-            parsed.uid.clone(),
-            parsed.nickname.clone(),
-            None,
-        ),
-    };
-
-    // If alias is empty, automatically use Douyin nickname as alias
-    let final_alias = if req.alias.trim().is_empty() {
-        nickname.clone().unwrap_or_else(|| "抖音账号".to_string())
-    } else {
-        req.alias.trim().to_string()
-    };
-
-    let id = format!("acc_{}", uuid::Uuid::new_v4().simple());
-    let account = Account {
-        id: id.clone(),
-        alias: final_alias,
-        sec_uid,
-        uid,
-        nickname,
-        avatar_url,
-        encrypted_cookie: encrypted,
-        status,
-        bark_key_override: req.bark_key_override.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()),
-        last_checked_at: Some(Utc::now()),
-        created_at: Utc::now(),
-        updated_at: Utc::now(),
-    };
-
-    db::insert_account(&state.pool, &account).await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"code": 500, "message": e.to_string()}))))?;
-    let uid_candidate = account.uid.as_deref().or(parsed.uid.as_deref());
-    if let (Some((priv_key, srv_data)), Some(u)) = (guard_opt, uid_candidate) {
-        if let Ok(uid_num) = u.parse::<u64>() {
-            if let Ok(mut ctx) = crate::douyin::im_auth::WebSessionContext::from_session(uid_num, &cleaned_cookie, crate::douyin::client::DEFAULT_USER_AGENT) {
-                ctx.guard_secret_hex = Some(priv_key);
-                ctx.guard_server_data = Some(srv_data);
-                ctx.guard_acquired_at = Some(chrono::Utc::now().timestamp());
-                if let Ok(enc_ctx) = state.secret_box.encrypt(&serde_json::to_vec(&ctx).unwrap_or_default()) {
-                    sqlx::query("INSERT INTO account_web_contexts(account_id,encrypted_context) VALUES(?1,?2) ON CONFLICT(account_id) DO UPDATE SET encrypted_context=excluded.encrypted_context")
-                        .bind(&id).bind(enc_ctx).execute(&state.pool).await.ok();
-                }
-            }
-        }
-    }
-
-    Ok(Json(json!({
-        "code": 200,
-        "data": {
-            "id": account.id,
-            "alias": account.alias,
-            "status": account.status,
-            "nickname": account.nickname,
-            "avatar_url": account.avatar_url,
-            "masked_cookie": mask_cookie(cookie_raw),
-        },
-        "message": "账号创建成功"
-    })))
-}
-
 pub async fn get_account(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
-    let acc = db::get_account(&state.pool, &id).await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"code": 500, "message": e.to_string()}))))?
-        .ok_or_else(|| (StatusCode::NOT_FOUND, Json(json!({"code": 404, "message": "账号不存在"}))))?;
+    let acc = db::get_account(&state.pool, &id)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"code": 500, "message": e.to_string()})),
+            )
+        })?
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(json!({"code": 404, "message": "账号不存在"})),
+            )
+        })?;
 
-    let plaintext = state.secret_box.decrypt(&acc.encrypted_cookie)
+    let plaintext = state
+        .secret_box
+        .decrypt(&acc.encrypted_cookie)
         .map(|b| String::from_utf8_lossy(&b).to_string())
         .unwrap_or_default();
-    let masked = mask_cookie(&plaintext);
 
-    let targets = db::list_targets(&state.pool, Some(&acc.id)).await.unwrap_or_default();
+    let targets = db::list_targets(&state.pool, Some(&acc.id))
+        .await
+        .unwrap_or_default();
     let total_targets = targets.len() as i64;
     let active_targets = targets.iter().filter(|t| t.is_enabled).count() as i64;
-    let (im_status, im_expires) = local_im_history_status(&state, &acc, &plaintext).await
-        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"code":500,"message":"IM 凭证状态读取失败"}))))?;
+    let (im_status, im_expires) = local_im_history_status(&state, &acc, &plaintext)
+        .await
+        .map_err(|_| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"code":500,"message":"IM 凭证状态读取失败"})),
+            )
+        })?;
+    let native = native_session_status(&state, &acc.id).await.map_err(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"code":500,"message":"原生登录会话状态读取失败"})),
+        )
+    })?;
+    let (im_status, im_expires) = if native.ready {
+        (im_status, im_expires)
+    } else {
+        ("MISSING", None)
+    };
 
     let dto = AccountDto {
         id: acc.id,
@@ -200,7 +199,10 @@ pub async fn get_account(
         uid: acc.uid,
         nickname: acc.nickname,
         avatar_url: acc.avatar_url,
-        masked_cookie: masked,
+        native_ready: native.ready,
+        native_sid_expires_at: native.sid_expires_at,
+        native_last_verified_at: native.last_verified_at,
+        native_last_beat_at: native.last_beat_at,
         status: acc.status,
         bark_key_override: acc.bark_key_override,
         targets_count: total_targets,
@@ -224,68 +226,59 @@ pub async fn update_account(
     Json(req): Json<UpdateAccountReq>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
     state.engine.record_manual_action();
-    let existing = db::get_account(&state.pool, &id).await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"code": 500, "message": e.to_string()}))))?
-        .ok_or_else(|| (StatusCode::NOT_FOUND, Json(json!({"code": 404, "message": "账号不存在"}))))?;
+    db::get_account(&state.pool, &id)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"code": 500, "message": e.to_string()})),
+            )
+        })?
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(json!({"code": 404, "message": "账号不存在"})),
+            )
+        })?;
 
     if let Some(alias) = req.alias.as_deref() {
         if !alias.trim().is_empty() {
-            db::update_account(&state.pool, &id, Some(alias.trim()), None, None).await
-                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"code": 500, "message": e.to_string()}))))?;
+            db::update_account(&state.pool, &id, Some(alias.trim()), None, None)
+                .await
+                .map_err(|e| {
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(json!({"code": 500, "message": e.to_string()})),
+                    )
+                })?;
         }
     }
 
     if let Some(status) = req.status.as_deref() {
-        db::update_account(&state.pool, &id, None, Some(status), None).await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"code": 500, "message": e.to_string()}))))?;
+        db::update_account(&state.pool, &id, None, Some(status), None)
+            .await
+            .map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"code": 500, "message": e.to_string()})),
+                )
+            })?;
     }
 
     if let Some(bark_key) = req.bark_key_override {
-        let key_opt = if bark_key.trim().is_empty() { None } else { Some(bark_key.trim()) };
-        db::update_account(&state.pool, &id, None, None, Some(key_opt)).await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"code": 500, "message": e.to_string()}))))?;
-    }
-
-    if let Some(new_cookie) = req.cookie.as_deref() {
-        let trimmed = new_cookie.trim();
-        if !trimmed.is_empty() {
-            let (cleaned_cookie, guard_opt) = crate::douyin::client::parse_credential_payload(trimmed);
-            if !cleaned_cookie.contains("sessionid=") && !cleaned_cookie.contains("sessionid_ss=") && !cleaned_cookie.contains("sid_tt=") {
-                return Err((StatusCode::BAD_REQUEST, Json(json!({
-                    "code": 400,
-                    "message": "更新失败：Cookie 中缺少关键凭证 sessionid！推荐在已登录抖音页面使用 SparkLight 油猴脚本(v2.2.0)点击「⚡ 复制 SparkLight 全量凭证」后直接粘贴导入。"
-                }))));
-            }
-            let cleaned_cookie = validate_account_cookie(&state,&existing,&cleaned_cookie).await?;
-            let encrypted = state.secret_box.encrypt(cleaned_cookie.as_bytes())
-                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"code": 500, "message": format!("加密 Cookie 失败: {e}")}))))?;
-            db::update_account_cookie(&state.pool, &id, &encrypted).await
-                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"code": 500, "message": e.to_string()}))))?;
-            if let (Some((priv_key, srv_data)), Some(u)) = (guard_opt, existing.uid.as_deref()) {
-                if let Ok(uid_num) = u.parse::<u64>() {
-                    let mut ctx = match sqlx::query_scalar::<_, Vec<u8>>("SELECT encrypted_context FROM account_web_contexts WHERE account_id=?1")
-                        .bind(&id).fetch_optional(&state.pool).await {
-                        Ok(Some(bytes)) => state.secret_box.decrypt(&bytes).ok()
-                            .and_then(|b| serde_json::from_slice::<crate::douyin::im_auth::WebSessionContext>(&b).ok())
-                            .unwrap_or_else(|| crate::douyin::im_auth::WebSessionContext::from_session(uid_num, &cleaned_cookie, crate::douyin::client::DEFAULT_USER_AGENT).unwrap()),
-                        _ => crate::douyin::im_auth::WebSessionContext::from_session(uid_num, &cleaned_cookie, crate::douyin::client::DEFAULT_USER_AGENT).unwrap(),
-                    };
-                    ctx.uid = uid_num;
-                    ctx.session_hash = crate::douyin::im_auth::session_hash(&cleaned_cookie).unwrap_or_default();
-                    ctx.guard_secret_hex = Some(priv_key);
-                    ctx.guard_server_data = Some(srv_data);
-                    ctx.guard_acquired_at = Some(chrono::Utc::now().timestamp());
-                    if let Ok(enc_ctx) = state.secret_box.encrypt(&serde_json::to_vec(&ctx).unwrap_or_default()) {
-                        sqlx::query("INSERT INTO account_web_contexts(account_id,encrypted_context) VALUES(?1,?2) ON CONFLICT(account_id) DO UPDATE SET encrypted_context=excluded.encrypted_context")
-                            .bind(&id).bind(enc_ctx).execute(&state.pool).await.ok();
-                    }
-                }
-            }
-
-            let updated = db::get_account(&state.pool, &id).await.unwrap_or(Some(existing)).unwrap();
-            // 手动保存/更新账号，静默检测，不向 Bark 发送告警通知
-            state.engine.check_account_cookie(&updated, false).await.ok();
-        }
+        let key_opt = if bark_key.trim().is_empty() {
+            None
+        } else {
+            Some(bark_key.trim())
+        };
+        db::update_account(&state.pool, &id, None, None, Some(key_opt))
+            .await
+            .map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"code": 500, "message": e.to_string()})),
+                )
+            })?;
     }
 
     Ok(Json(json!({
@@ -299,8 +292,26 @@ pub async fn delete_account(
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
     state.engine.record_manual_action();
-    db::delete_account(&state.pool, &id).await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"code": 500, "message": e.to_string()}))))?;
+    let login_ids = {
+        let mut logins = state.logins.lock().await;
+        let ids = logins
+            .iter()
+            .filter(|(_, session)| session.account_id == id)
+            .map(|(login_id, _)| login_id.clone())
+            .collect::<Vec<_>>();
+        ids.into_iter()
+            .filter_map(|login_id| logins.remove(&login_id))
+            .collect::<Vec<_>>()
+    };
+    for mut session in login_ids {
+        session.shutdown().await;
+    }
+    db::delete_account(&state.pool, &id).await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"code": 500, "message": e.to_string()})),
+        )
+    })?;
 
     Ok(Json(json!({
         "code": 200,
@@ -313,32 +324,91 @@ pub async fn check_account(
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
     state.engine.record_manual_action();
-    let account = db::get_account(&state.pool, &id).await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"code": 500, "message": e.to_string()}))))?
-        .ok_or_else(|| (StatusCode::NOT_FOUND, Json(json!({"code": 404, "message": "账号不存在"}))))?;
+    let account = db::get_account(&state.pool, &id)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"code": 500, "message": e.to_string()})),
+            )
+        })?
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(json!({"code": 404, "message": "账号不存在"})),
+            )
+        })?;
 
-    tracing::info!(account_alias = %account.alias, "用户在前端手动点击检测有效性，严格保持静默，不触发 Bark 推送");
-    // 前台手动点击检测有效性为主动测试行为，结果直接在网页前端提示，严禁向 Bark 发送推送通知
-    let is_valid = match state.engine.check_account_cookie(&account, false).await {
-        Ok(v) => v,
-        Err(e) => {
-            tracing::warn!(account_alias = %account.alias, err = %e, "检测账号有效性遇到诊断异常，按未通过处理返回前端，严格保持静默不发 Bark");
-            false
+    tracing::info!(
+        account_alias = %account.alias,
+        "用户手动检测 App 原生会话，严格保持静默，不触发 Bark 推送"
+    );
+    let checked = match state.engine.check_native_account(&account, false).await {
+        Ok(checked) => checked,
+        Err(error) => {
+            tracing::warn!(
+                account_alias = %account.alias,
+                error = %error,
+                "App 原生会话检测异常，未清除现有账号状态"
+            );
+            crate::douyin::login::NativeCheck::Unconfirmed(
+                "App 原生会话检测异常，保留现有登录态".to_string(),
+            )
+        }
+    };
+    let (is_valid, confirmed, check_state, message) = match checked {
+        crate::douyin::login::NativeCheck::Valid(_) => (
+            true,
+            true,
+            "valid",
+            "抖音 App 原生会话有效，账号登录态已确认",
+        ),
+        crate::douyin::login::NativeCheck::Expired(reason) => {
+            tracing::info!(account_alias = %account.alias, reason = %reason, "抖音明确返回登录会话失效");
+            (
+                false,
+                true,
+                "expired",
+                "抖音明确返回登录会话失效，请重新扫码",
+            )
+        }
+        crate::douyin::login::NativeCheck::Unconfirmed(reason) => {
+            tracing::warn!(account_alias = %account.alias, reason = %reason, "抖音登录态本次未确认");
+            let has_native = db::load_native_session(&state.pool, &state.secret_box, &account.id)
+                .await
+                .ok()
+                .flatten()
+                .is_some();
+            (
+                false,
+                false,
+                "unconfirmed",
+                if has_native {
+                    "本次未确认 App 原生登录态；网络、限流或协议异常不会清除现有会话"
+                } else {
+                    "当前账号尚未导入 App 原生会话；旧 Web Cookie 不能作为登录有效性的确认依据，请扫码或导入官方 Android 原生会话"
+                },
+            )
         }
     };
 
-    let latest = db::get_account(&state.pool, &id).await.unwrap_or(Some(account)).unwrap();
+    let latest = db::get_account(&state.pool, &id)
+        .await
+        .unwrap_or(Some(account))
+        .unwrap();
 
     Ok(Json(json!({
         "code": 200,
         "data": {
             "is_valid": is_valid,
+            "confirmed": confirmed,
+            "check_state": check_state,
             "status": latest.status,
             "nickname": latest.nickname,
             "avatar_url": latest.avatar_url,
             "last_checked_at": latest.last_checked_at,
         },
-        "message": if is_valid { "Cookie 有效，个人信息已同步" } else { "登录态检查未通过，请查看日志；网络或协议异常不会直接判定失效" }
+        "message": message
     })))
 }
 
@@ -347,42 +417,138 @@ pub async fn sync_friends(
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
     state.engine.record_manual_action();
-    let account = db::get_account(&state.pool, &id).await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"code": 500, "message": e.to_string()}))))?
-        .ok_or_else(|| (StatusCode::NOT_FOUND, Json(json!({"code": 404, "message": "账号不存在"}))))?;
+    let account = db::get_account(&state.pool, &id)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"code": 500, "message": e.to_string()})),
+            )
+        })?
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(json!({"code": 404, "message": "账号不存在"})),
+            )
+        })?;
 
-    let existing_targets = db::list_targets(&state.pool, Some(&account.id)).await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"code":500,"message":e.to_string()}))))?;
+    let existing_targets = db::list_targets(&state.pool, Some(&account.id))
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"code":500,"message":e.to_string()})),
+            )
+        })?;
     // 在任何网络操作前撤销旧检测；请求失败也不能继续冒充刷新成功。
     for target in &existing_targets {
-        db::record_target_today_state(&state.pool, &target.id, None, Utc::now()).await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"code":500,"message":e.to_string()}))))?;
+        db::record_target_today_state(&state.pool, &target.id, None, Utc::now())
+            .await
+            .map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"code":500,"message":e.to_string()})),
+                )
+            })?;
     }
-    let plaintext = state.secret_box.decrypt(&account.encrypted_cookie)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"code": 500, "message": format!("解密失败: {e}")}))))?;
-    let cookie_str = String::from_utf8(plaintext)
-        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"code": 500, "message": "Cookie 无效"}))))?;
+    let plaintext = state
+        .secret_box
+        .decrypt(&account.encrypted_cookie)
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"code": 500, "message": format!("解密失败: {e}")})),
+            )
+        })?;
+    let cookie_str = String::from_utf8(plaintext).map_err(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"code": 500, "message": "Cookie 无效"})),
+        )
+    })?;
 
-    let client = DouyinClient::new(&cookie_str, &account.alias)
-        .map_err(|e| (StatusCode::BAD_REQUEST, Json(json!({"code": 400, "message": e.to_string()}))))?;
-    client.load_web_context(&state.pool,&state.secret_box,&account.id,account.uid.as_deref()).await
-        .map_err(|_| (StatusCode::BAD_REQUEST,Json(json!({"code":400,"message":"账号 Web 上下文无效，停止同步"}))))?;
+    let client = DouyinClient::for_account(
+        &state.pool,
+        &state.secret_box,
+        &account.id,
+        &cookie_str,
+        &account.alias,
+    )
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"code": 400, "message": e.to_string()})),
+        )
+    })?;
+    client
+        .load_web_context(
+            &state.pool,
+            &state.secret_box,
+            &account.id,
+            account.uid.as_deref(),
+        )
+        .await
+        .map_err(|_| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"code":400,"message":"账号 Web 上下文无效，停止同步"})),
+            )
+        })?;
 
     let (uid, sec_uid) = match (&account.uid, &account.sec_uid) {
         (Some(u), Some(s)) => (u.as_str(), s.as_str()),
-        _ => return Err((StatusCode::BAD_REQUEST, Json(json!({"code": 400, "message": "账号未完成初始化检测，缺少 UID / SecUID"})))),
+        _ => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(json!({"code": 400, "message": "账号未完成初始化检测，缺少 UID / SecUID"})),
+            ));
+        }
     };
 
     if !client.check_cookie().await.is_valid() {
-        return Err((StatusCode::BAD_REQUEST,Json(json!({"code":400,"message":"当前登录态未确认，已停止同步"}))));
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({"code":400,"message":"当前登录态未确认，已停止同步"})),
+        ));
     }
-    client.verified_sender_uid(Some(uid)).map_err(|_| (StatusCode::BAD_REQUEST,Json(json!({"code":400,"message":"当前 Cookie 与账号不符，已停止同步"}))))?;
-    client.acquire_im_identity(Some(uid)).await.map_err(|_| (StatusCode::BAD_REQUEST,Json(json!({"code":400,"message":"IM 身份凭证获取失败，已停止同步，未自动重试"}))))?;
-    client.persist_im_session(&state.pool,&state.secret_box,&account.id,&account.encrypted_cookie,Some(uid)).await
-        .map_err(|_| (StatusCode::CONFLICT,Json(json!({"code":409,"message":"账号会话已变化或 IM 凭证保存失败，请重新同步"}))))?;
+    client.verified_sender_uid(Some(uid)).map_err(|_| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"code":400,"message":"当前 Cookie 与账号不符，已停止同步"})),
+        )
+    })?;
+    client.acquire_im_identity(Some(uid)).await.map_err(|_| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"code":400,"message":"IM 身份凭证获取失败，已停止同步，未自动重试"})),
+        )
+    })?;
+    client
+        .persist_im_session(
+            &state.pool,
+            &state.secret_box,
+            &account.id,
+            &account.encrypted_cookie,
+            Some(uid),
+        )
+        .await
+        .map_err(|_| {
+            (
+                StatusCode::CONFLICT,
+                Json(json!({"code":409,"message":"账号会话已变化或 IM 凭证保存失败，请重新同步"})),
+            )
+        })?;
 
-    let mut friends = client.fetch_following_friends(uid, sec_uid).await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"code": 500, "message": format!("获取关注/好友列表失败: {e}")}))))?;
+    let mut friends = client
+        .fetch_following_friends(uid, sec_uid)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"code": 500, "message": format!("获取关注/好友列表失败: {e}")})),
+            )
+        })?;
 
     let my_uid_num: u64 = uid.parse().unwrap_or(0);
     let mut confirmed = 0;
@@ -391,43 +557,81 @@ pub async fn sync_friends(
     for target in existing_targets {
         let matched_pos = friends.iter().position(|f| {
             if target.conversation_type == 2 {
-                f.target_type == Some(2) && (f.sec_uid == target.target_sec_uid
-                    || target.conversation_id.as_deref().is_some_and(|cid| f.conversation_id.as_deref() == Some(cid)))
+                f.target_type == Some(2)
+                    && (f.sec_uid == target.target_sec_uid
+                        || target
+                            .conversation_id
+                            .as_deref()
+                            .is_some_and(|cid| f.conversation_id.as_deref() == Some(cid)))
             } else {
                 f.sec_uid == target.target_sec_uid
-                    || target.target_uid.as_deref().filter(|id| !id.is_empty()).is_some_and(|id| f.uid == id)
+                    || target
+                        .target_uid
+                        .as_deref()
+                        .filter(|id| !id.is_empty())
+                        .is_some_and(|id| f.uid == id)
             }
         });
         if let Some(pos) = matched_pos {
             let matched = &friends[pos];
             let update_req = crate::model::UpdateTargetReq {
-                conversation_type: None, is_enabled: None,
+                conversation_type: None,
+                is_enabled: None,
                 target_nickname: Some(matched.nickname.clone()),
                 remark_name: matched.remark_name.clone(),
-                target_avatar: if matched.avatar_url.is_empty() { None } else { Some(matched.avatar_url.clone()) },
-                spark_days: matched.spark_days, spark_desc: matched.spark_desc.clone(),
-                is_sparked_today: None, message_template: None,
+                target_avatar: if matched.avatar_url.is_empty() {
+                    None
+                } else {
+                    Some(matched.avatar_url.clone())
+                },
+                spark_days: matched.spark_days,
+                spark_desc: matched.spark_desc.clone(),
+                is_sparked_today: None,
+                message_template: None,
             };
-            db::update_target(&state.pool, &target.id, &update_req).await
-                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"code":500,"message":e.to_string()}))))?;
+            db::update_target(&state.pool, &target.id, &update_req)
+                .await
+                .map_err(|e| {
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(json!({"code":500,"message":e.to_string()})),
+                    )
+                })?;
         }
 
         let checked_at = Utc::now();
-        let today_sent = if crate::model::system_sent_today(target.last_status.as_deref(), target.last_sent_at, checked_at) {
+        let today_sent = if crate::model::system_sent_today(
+            target.last_status.as_deref(),
+            target.last_sent_at,
+            checked_at,
+        ) {
             Some(true)
         } else if !history_available || client.risk_limited() || my_uid_num == 0 {
             None
         } else {
             let conv_id = if target.conversation_type == 2 {
-                target.conversation_id.clone().unwrap_or_else(|| target.target_sec_uid.clone())
-            } else if let Some(other) = target.target_uid.as_deref().and_then(|id| id.parse::<u64>().ok()).filter(|id| *id > 0) {
+                target
+                    .conversation_id
+                    .clone()
+                    .unwrap_or_else(|| target.target_sec_uid.clone())
+            } else if let Some(other) = target
+                .target_uid
+                .as_deref()
+                .and_then(|id| id.parse::<u64>().ok())
+                .filter(|id| *id > 0)
+            {
                 format!("0:1:{}:{}", my_uid_num.min(other), my_uid_num.max(other))
             } else {
                 String::new()
             };
-            if conv_id.is_empty() { None } else {
+            if conv_id.is_empty() {
+                None
+            } else {
                 // 统一通过 cmd610 获取真实短 ID，不能把逻辑群 ID 猜成 short ID。
-                match client.check_i_sent_message_today(my_uid_num, &conv_id, target.conversation_type, 0).await {
+                match client
+                    .check_i_sent_message_today(my_uid_num, &conv_id, target.conversation_type, 0)
+                    .await
+                {
                     Ok(sent) => Some(sent),
                     Err(_) => {
                         tracing::warn!(target_id = %target.id, "今日消息历史未确认，已清除旧检测状态");
@@ -436,10 +640,20 @@ pub async fn sync_friends(
                 }
             }
         };
-        db::record_target_today_state(&state.pool, &target.id, today_sent, checked_at).await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"code":500,"message":e.to_string()}))))?;
-        if today_sent.is_some() { confirmed += 1; }
-        if let Some(pos) = matched_pos { friends[pos].is_sparked_today = today_sent; }
+        db::record_target_today_state(&state.pool, &target.id, today_sent, checked_at)
+            .await
+            .map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"code":500,"message":e.to_string()})),
+                )
+            })?;
+        if today_sent.is_some() {
+            confirmed += 1;
+        }
+        if let Some(pos) = matched_pos {
+            friends[pos].is_sparked_today = today_sent;
+        }
     }
     let unconfirmed = target_count - confirmed;
     Ok(Json(json!({
@@ -459,8 +673,16 @@ pub async fn run_account(
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
     state.engine.record_manual_action();
-    let summary = state.engine.execute_single_account(&id, true, false).await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"code": 500, "message": e.to_string()}))))?;
+    let summary = state
+        .engine
+        .execute_single_account(&id, true, false)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"code": 500, "message": e.to_string()})),
+            )
+        })?;
 
     Ok(Json(json!({
         "code": 200,
@@ -471,118 +693,4 @@ pub async fn run_account(
             crate::scheduler::ExecutionStatus::Failed => "账号续火花任务执行失败",
         }
     })))
-}
-
-#[derive(serde::Deserialize)]
-pub struct SyncBrowserReq {
-    pub cookie: String,
-}
-
-pub async fn sync_from_browser(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-    Json(req): Json<SyncBrowserReq>,
-) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
-    state.engine.record_manual_action();
-    let clean = req.cookie.trim();
-    if clean.is_empty() {
-        return Err((StatusCode::BAD_REQUEST, Json(json!({"code": 400, "message": "Cookie 内容不能为空"}))));
-    }
-
-    let (cleaned_cookie, guard_opt) = crate::douyin::client::parse_credential_payload(clean);
-    if !cleaned_cookie.contains("sessionid=") && !cleaned_cookie.contains("sessionid_ss=") && !cleaned_cookie.contains("sid_tt=") {
-        return Err((StatusCode::BAD_REQUEST, Json(json!({
-            "code": 400,
-            "message": "同步失败：Cookie 中缺少关键凭证 sessionid！请使用右侧「油猴全自动脚本」在抖音网页端一键复制全量凭证后粘贴。"
-        }))));
-    }
-
-    let account=db::get_account(&state.pool,&id).await
-        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR,Json(json!({"code":500,"message":"账号查询失败"}))))?
-        .ok_or_else(|| (StatusCode::NOT_FOUND,Json(json!({"code":404,"message":"账号不存在"}))))?;
-    let expected_uid = account.uid.as_deref().filter(|uid| uid.parse::<u64>().is_ok_and(|id| id > 0))
-        .ok_or_else(|| (StatusCode::BAD_REQUEST, Json(json!({"code":400,"message":"账号身份尚未绑定，未同步"}))))?;
-    let client = DouyinClient::new(&cleaned_cookie, &account.alias)
-        .map_err(|_| (StatusCode::BAD_REQUEST, Json(json!({"code":400,"message":"浏览器会话格式无效"}))))?;
-    client.sync_browser_session(&state.pool, &state.secret_box, &id, &account.encrypted_cookie, expected_uid).await
-        .map_err(|_| (StatusCode::CONFLICT, Json(json!({"code":409,"message":"浏览器会话或 IM 身份验证失败，或账号已被更新；原会话未覆盖，未发送且未重试"}))))?;
-    if let (Some((priv_key, srv_data)), Some(u)) = (guard_opt, account.uid.as_deref()) {
-        if let Ok(uid_num) = u.parse::<u64>() {
-            if let Ok(mut ctx) = crate::douyin::im_auth::WebSessionContext::from_session(uid_num, &cleaned_cookie, crate::douyin::client::DEFAULT_USER_AGENT) {
-                ctx.guard_secret_hex = Some(priv_key);
-                ctx.guard_server_data = Some(srv_data);
-                ctx.guard_acquired_at = Some(chrono::Utc::now().timestamp());
-                if let Ok(enc_ctx) = state.secret_box.encrypt(&serde_json::to_vec(&ctx).unwrap_or_default()) {
-                    sqlx::query("INSERT INTO account_web_contexts(account_id,encrypted_context) VALUES(?1,?2) ON CONFLICT(account_id) DO UPDATE SET encrypted_context=excluded.encrypted_context")
-                        .bind(&id).bind(enc_ctx).execute(&state.pool).await.ok();
-                }
-            }
-        }
-    }
-    let history = client.im_history_status(Some(expected_uid));
-    Ok(Json(json!({
-        "code": 200,
-        "message": "浏览器会话与 IM 身份已同步；尚无发送授权，未发送消息",
-        "data": {"im_history_status":history.0,"im_history_expires_at":history.1,"send_authorization_status":"MISSING","send_requests":0}
-    })))
-}
-
-#[derive(serde::Deserialize)]
-pub struct ImportImCredentialReq {
-    pub captured_at: i64,
-    pub cookie: String,
-    pub body: Vec<u8>,
-    pub user_agent: String,
-    pub headers: std::collections::BTreeMap<String, String>,
-}
-
-/// 仅导入当前账号官方浏览器签发的发送凭证；此接口不发送消息。
-pub async fn import_im_credential(
-    State(state): State<AppState>, Path(id): Path<String>, Json(req): Json<ImportImCredentialReq>,
-) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
-    state.engine.record_manual_action();
-    let bad = |message: String| (StatusCode::BAD_REQUEST, Json(json!({"code":400,"message":message})));
-    let internal = |_| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"code":500,"message":"IM 凭证加密保存失败"})));
-    let account = db::get_account(&state.pool, &id).await.map_err(|_| bad("账号查询失败".into()))?
-        .ok_or_else(|| bad("账号不存在".into()))?;
-    let expected_uid = account.uid.as_deref().and_then(|uid| uid.parse::<u64>().ok()).filter(|uid| *uid > 0)
-        .ok_or_else(|| bad("账号缺少有效 UID，禁止导入".into()))?;
-    let cookie = crate::douyin::client::extract_clean_cookie(&req.cookie);
-    let mut credential = crate::douyin::im_auth::ImSendCredential::from_capture(expected_uid, &cookie, req.body, req.user_agent, req.headers)
-        .map_err(|e| bad(e.to_string()))?;
-    credential.captured_at = req.captured_at;
-    credential.validate(expected_uid, &cookie, &credential.conversation_id, credential.conversation_type).map_err(|e| bad(e.to_string()))?;
-    let client = DouyinClient::new(&cookie, &account.alias).map_err(|_| bad("Cookie 格式无效".into()))?;
-    let context = crate::douyin::im_auth::WebSessionContext::from_credential(&credential);
-    client.set_web_context(context.clone()).map_err(|_| bad("Web 上下文无效".into()))?;
-    match client.check_cookie().await {
-        crate::douyin::types::CheckCookieResult::Valid(profile) if profile.uid == expected_uid.to_string() => {},
-        _ => return Err(bad("当前 Cookie 无效、需安全验证或身份不符，未保存任何凭证".into())),
-    }
-    let cookie=client.get_current_cookie();
-    credential.validate(expected_uid,&cookie,&credential.conversation_id,credential.conversation_type).map_err(|e| bad(e.to_string()))?;
-    let encrypted_cookie = state.secret_box.encrypt(cookie.as_bytes()).map_err(internal)?;
-    let encoded = serde_json::to_vec(&credential).map_err(|_| bad("IM 凭证编码失败".into()))?;
-    let encrypted = state.secret_box.encrypt(&encoded).map_err(internal)?;
-    let encrypted_context = state.secret_box.encrypt(&serde_json::to_vec(&context).map_err(|_| bad("Web 上下文编码失败".into()))?).map_err(internal)?;
-    let mut transaction = state.pool.begin().await.map_err(|_| bad("无法保存 IM 凭证".into()))?;
-    sqlx::query("DELETE FROM account_im_credentials WHERE account_id=?1").bind(&id).execute(&mut *transaction).await.map_err(|_| bad("无法清理旧 IM 凭证".into()))?;
-    sqlx::query("INSERT INTO account_im_credentials(account_id, conversation_id, encrypted_credential) VALUES(?1,?2,?3) ON CONFLICT(account_id,conversation_id) DO UPDATE SET encrypted_credential=excluded.encrypted_credential")
-        .bind(&id).bind(&credential.conversation_id).bind(encrypted).execute(&mut *transaction).await.map_err(|_| bad("无法保存 IM 凭证".into()))?;
-    sqlx::query("INSERT INTO account_web_contexts(account_id,encrypted_context) VALUES(?1,?2) ON CONFLICT(account_id) DO UPDATE SET encrypted_context=excluded.encrypted_context")
-        .bind(&id).bind(encrypted_context).execute(&mut *transaction).await.map_err(|_| bad("无法保存 Web 上下文".into()))?;
-    sqlx::query("UPDATE accounts SET encrypted_cookie=?1,status='ACTIVE',last_checked_at=?2,updated_at=?2 WHERE id=?3")
-        .bind(encrypted_cookie).bind(Utc::now().to_rfc3339()).bind(&id).execute(&mut *transaction).await.map_err(|_| bad("无法保存账号凭证".into()))?;
-    transaction.commit().await.map_err(|_| bad("无法提交 IM 凭证".into()))?;
-    Ok(Json(json!({"code":200,"message":"官方 IM 凭证已加密保存，未发送消息","data":{"uid":expected_uid.to_string(),"conversation_id":credential.conversation_id,"short_id":credential.short_id.to_string()}})))
-}
-
-async fn validate_account_cookie(state: &AppState, account: &Account, cookie: &str) -> Result<String,(StatusCode,Json<serde_json::Value>)> {
-    let bad=|message:&str| (StatusCode::BAD_REQUEST,Json(json!({"code":400,"message":message})));
-    let client=DouyinClient::new(cookie,&account.alias).map_err(|_| bad("Cookie 格式无效"))?;
-    client.load_web_context(&state.pool,&state.secret_box,&account.id,account.uid.as_deref()).await.map_err(|_| bad("Web 上下文加载失败"))?;
-    let checked=client.check_cookie().await;
-    if !checked.is_valid() { return Err(bad(checked.error_message().unwrap_or("会话检测失败，未保存 Cookie"))); }
-    client.verified_sender_uid(account.uid.as_deref()).map_err(|_| bad("Cookie 不属于当前账号，未保存"))?;
-    Ok(client.get_current_cookie())
 }

@@ -1,5 +1,5 @@
-use std::{net::SocketAddr, sync::Arc};
 use anyhow::{Context, Result};
+use std::{net::SocketAddr, sync::Arc};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use sparklight::{
@@ -7,8 +7,8 @@ use sparklight::{
     crypto::{self, load_or_create_master_key},
     db,
     notify::bark::BarkNotifier,
-    scheduler::{start_daily_scheduler, SparkEngine},
-    server::{create_router, AppState},
+    scheduler::{SparkEngine, start_daily_scheduler},
+    server::{AppState, create_router, start_login_reaper},
 };
 
 #[tokio::main]
@@ -27,12 +27,13 @@ async fn main() -> Result<()> {
     tracing::info!(data_dir = %config.data_dir.display(), "数据存储路径已就绪");
 
     // Load or create XChaCha20Poly1305 master key
-    let master_key = load_or_create_master_key(&config.data_dir)
-        .context("加载或生成主加密密钥失败")?;
+    let master_key =
+        load_or_create_master_key(&config.data_dir).context("加载或生成主加密密钥失败")?;
     tracing::info!("主加密密钥初始化成功 (XChaCha20Poly1305)");
 
     // Initialize SQLite pool and run migrations
-    let pool = db::init_pool(&config.db_url).await
+    let pool = db::init_pool(&config.db_url)
+        .await
         .context("初始化 SQLite 数据库失败")?;
     tracing::info!(db = %config.db_url, "SQLite 数据库初始化与迁移完成");
 
@@ -62,10 +63,7 @@ async fn main() -> Result<()> {
         .get("bark_server")
         .cloned()
         .unwrap_or(config.bark_server);
-    let bark_key = saved_settings
-        .get("bark_key")
-        .cloned()
-        .or(config.bark_key);
+    let bark_key = saved_settings.get("bark_key").cloned().or(config.bark_key);
     let schedule_time = saved_settings
         .get("spark_time")
         .cloned()
@@ -99,14 +97,16 @@ async fn main() -> Result<()> {
     sparklight::scheduler::start_heartbeat_worker(engine.clone());
     tracing::info!(schedule_time = %schedule_time, max_retries = %max_retries, "每日定时检测与续火花调度器已激活");
 
-    let app_state = AppState {
+    let app_state = AppState::new(
         pool,
-        secret_box: master_key,
+        master_key,
         engine,
-        api_key: Arc::new(api_key.clone()),
-    };
+        Arc::new(api_key.clone()),
+        config.data_dir.clone(),
+    );
+    start_login_reaper(app_state.clone());
 
-    let app = create_router(app_state);
+    let app = create_router(app_state.clone());
 
     let addr: SocketAddr = format!("{}:{}", config.host, config.port)
         .parse()
@@ -114,13 +114,22 @@ async fn main() -> Result<()> {
 
     tracing::info!("SparkLight Web API 服务正在监听: http://{}", addr);
 
-    let listener = tokio::net::TcpListener::bind(addr).await
+    let listener = tokio::net::TcpListener::bind(addr)
+        .await
         .with_context(|| format!("绑定端口失败: {addr}"))?;
 
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
         .await
         .context("Axum 服务运行异常")?;
+
+    let sessions = {
+        let mut logins = app_state.logins.lock().await;
+        std::mem::take(&mut *logins)
+    };
+    for mut session in sessions.into_values() {
+        session.shutdown().await;
+    }
 
     tracing::info!("SparkLight 服务已正常关闭");
     Ok(())

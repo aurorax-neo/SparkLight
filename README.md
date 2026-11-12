@@ -1,22 +1,23 @@
 # SparkLight - 抖音多账号隔离与每日续火花系统
 
-SparkLight 是一款专为多抖音账号隔离维护、好友续火花对象管理与凭证健康监测设计的高性能轻量化系统。后端采用纯 Rust 原生开发（Axum + Tokio + SQLite + reqwest），前端采用 React 18 + TypeScript + TailwindCSS 现代化管理控制台。系统全程由 Rust 原生 HTTP/Protobuf 协议栈驱动，**无须常驻任何无头浏览器（Puppeteer / Playwright）**，内存占用极低，运行毫秒级响应。
+SparkLight 是一款专为多抖音账号隔离维护、好友续火花对象管理与凭证健康监测设计的高性能轻量化系统。后端采用纯 Rust 原生开发（Axum + Tokio + SQLite + reqwest），前端采用 React 18 + TypeScript + TailwindCSS 现代化管理控制台。二维码协议、TokenBeat、Web/IM 身份获取、原生会话导入与发信请求全部由 Rust 进程完成，不依赖 Brave、Chrome、ScriptCat、Puppeteer 或 Playwright。
 
 ---
 
 ## 核心特性
 
-- **纯 Rust 原生协议栈，告别重量级浏览器依赖**：
-  系统所有登录态巡检、好友关系同步、会话票据获取与发信互动请求均由纯 Rust 原生协议栈驱动，内存占用低（常驻仅数十兆），毫秒级极速响应，无需部署 Chromium 等重量级运行时。
-- **Scheme A 官方全链签名体系（彻底杜绝 KICK 踢下线）**：
-  - **正牌私钥与服务端票据持久化**：系统自主加密持有账号在真实浏览器中绑定的 P-256 签名私钥与官方服务端签发的 Ticket Guard 票据；
+- **纯 Rust 原生协议栈，无外部浏览器依赖**：
+  登录态巡检、好友关系同步、身份票据获取与发信互动均由 Rust 协议栈驱动；添加账号时直接在页面内展示抖音 App 官方二维码，确认后保存原生 Cookie、`X-Tt-Token`、`d_ticket`、`session_key` 与账号级设备参数。原生校验每 30 分钟节流，App TokenBeat 与 Web 身份 Token 每 6 小时维护，网络或协议异常只标记“未确认”，不会清空仍可恢复的登录态。
+- **Scheme A 官方全链签名体系（严格按官方链路签名，降低 KICK 风险）**：
+  - **Guard 私钥与服务端票据持久化**：Rust 在登录后的 Web/IM 引导阶段获取并加密保存账号对应的 P-256 Guard 私钥与官方服务端票据；
   - **100% 真实签名发送（Signed 模式）**：发信时使用该真实私钥对票据材料进行 ECDSA/HMAC 计算，携带完整的 `bd-ticket-guard-client-data`、`ts_sign`、`req_sign` 与 `t_trust: 1` 标识，彻底杜绝未签名公钥裸奔触发的风控下线；
   - **Protobuf 运行指纹全量对齐**：外层报文扩展头完整注入 19 项官方浏览器环境特征（如 `browser_platform`、`browser_version`、`screen_width`、`screen_height`、`timezone_name`、`cookie_enabled` 等），消息层注入高精度 `s:stime` 浮点时间戳；
   - **动态参数与 Client-Hints 补齐**：自动提取 `s_v_web_id` 构建 `verifyFp` 与 `fp`，动态派生高熵 `msToken`，补全现代浏览器 Client-Hints 与安全请求头。
-- **油猴全自动凭证提取助手（UserScript v2.2.0）**：
-  - 提供专属 UserScript 脚本（`tools/sparklight_extractor.user.js`），支持 Tampermonkey 与 ScriptCat；
-  - 在已登录的抖音网页版页面右下角常驻悬浮胶囊按钮，利用扩展特权能力一键聚合提取全量 HttpOnly Cookie（包含核心 `sessionid`、`passport_assist_user` 等）与 LocalStorage 中的官方 Guard 签名私钥和票据；
-  - **100% 纯本地复制**：不产生任何外部网络请求，一键打包写入剪贴板，返回控制台一次粘贴即可完成导入；彻底废除控制台命令、本机 Python 助手及手动抓包等繁琐易错手段。
+- **应用内扫码与官方原生会话导入，无需安装浏览器或扩展**：
+  - 添加账号时由 Rust 直接请求抖音 App `get_qrcode` 官方接口，并在管理页展示二维码；受信任设备可直接完成登录；
+  - 抖音对新设备启用 TicketGuard/TEE 设备证明，纯软件无法生成真实 Android 硬件证明。被 `4044` 拒绝时，使用 `native_session_import` 导入同一账号在官方 Android 客户端已建立的原生会话，再由纯 Rust TokenBeat 持续维护；
+  - TokenBeat、身份 Token、Guard 私钥与票据材料均由 Rust 请求和加密落库，不复制日常浏览器 Cookie；
+  - **账号级设备指纹隔离**：指纹由账号 ID 确定性派生并加密持久化，同一账号永久一致、不同账号必然不同，杜绝多账号共用指纹导致的风控关联。
 - **好友头像与备注名（remark_name）智能同步**：
   - 一键同步关注好友列表，自动解析会话扩展中的真实备注名（`remark_name`）与高清头像链接并更新入库；
   - 目标列表中优先高亮显示备注名并括注抖音原生昵称；支持在编辑弹窗中自定义修改备注名，头像自带防盗链处理与加载失败自动降级。
@@ -33,37 +34,24 @@ SparkLight 是一款专为多抖音账号隔离维护、好友续火花对象管
 
 ---
 
-## 凭证一键提取与导入流程（油猴脚本 v2.2.0）
+## 账号登录与凭证同步流程
 
-系统全面采用油猴全自动脚本一键提取全量凭证，无需打开开发者工具抓包，无需复制 cURL 命令。
+系统不提供浏览器 Cookie 复制入口，也不读取用户日常浏览器资料。服务端直接对接抖音 App Passport；新设备若被 TicketGuard/TEE 拒绝，可导入官方 Android 客户端的原生会话。
 
-### 第 1 步：安装油猴脚本
-1. 在电脑浏览器（Chrome / Brave / Edge 等）安装任意用户脚本管理器扩展（推荐 **Tampermonkey** 或 **ScriptCat**）；
-2. 在扩展中「添加新脚本」，将本项目中的 `tools/sparklight_extractor.user.js`（或在 SparkLight 控制台「全自动凭证提取助手」中点击「复制油猴脚本代码」）粘贴并保存。
+### 第 1 步：发起登录
+1. 在账号管理页点击「添加账号」，填写别名（可留空，登录后自动取抖音昵称）；
+2. 点击「获取登录二维码」，服务端会向抖音申请该账号独占设备参数对应的官方二维码。
 
-### 第 2 步：一键提取并复制
-1. 打开或刷新已登录的抖音网页版页面（`https://www.douyin.com/`）；
-2. 页面右下角会自动出现悬浮胶囊按钮：**`⚡ 复制 SparkLight 全量凭证`**；
-3. 点击该按钮，脚本自动聚合全量 HttpOnly Cookie 与 Guard 签名私钥，写入系统剪贴板并弹出成功提示。
+### 第 2 步：使用抖音 App 确认
+1. 使用抖音 App 扫描页面中的二维码；
+2. 在手机端确认登录，页面会实时显示已扫码、等待确认、成功或过期状态。
 
-### 第 3 步：一次粘贴导入
-1. 返回 SparkLight 控制台，在「添加账号」或「更新凭证」输入框中直接粘贴（Cmd+V / Ctrl+V）；
-2. 系统自动识别全量凭证对象，将 Cookie 与 Guard 密钥材料加密绑定入库。
+### 第 3 步：自动同步
+1. Rust 服务端收到官方确认后解析 UID、`sec_uid`、昵称、头像、Cookie 与原生令牌；
+2. 会话、账号独占设备参数、Web/IM 身份和 Guard 材料在同一事务内加密落库，账号立即变为「登录正常」；若 Web 发送材料暂未恢复，会明确显示待恢复，而不是伪装为可发送。
 
-#### 导入凭证对象格式（sparklight_credential 规范）
-导出的凭证为标准 JSON 对象，格式如下（系统仅在内存解密，落库全程加密）：
-```json
-{
-  "type": "sparklight_credential",
-  "version": "2.2.0",
-  "extracted_at": "2026-10-16T12:00:00.000Z",
-  "uid": "12345678901",
-  "nickname": "示例用户",
-  "cookie": "sessionid=***; passport_assist_user=***; ...",
-  "guard_private_key": "3081...",
-  "guard_server_data": "{\"ticket\":\"***\",\"expire_time\":...}"
-}
-```
+### 已失效账号的重新登录
+账号卡片右侧的登录按钮可重新获取二维码。若抖音明确返回 `4044` TicketGuard 设备证明拒绝，可在「添加账号」中直接导入同一官方 Android 客户端建立的原生会话；新账号无需先扫码，服务端会按 UID 查重。详见 [原生会话导入说明](docs/native-session-import.md)。导入成功后由 App TokenBeat 自动维护，不需要重新复制 Cookie。
 
 ---
 
@@ -77,10 +65,10 @@ SparkLight 是一款专为多抖音账号隔离维护、好友续火花对象管
 
 ### 2. Scheme A 突破与全面闭环
 为了从根本上解决凭证健康与稳定发送问题，系统实施了 Scheme A 官方签名体系重构：
-1. **浏览器正牌私钥与票据复用**：利用油猴脚本特权直接提取浏览器已完成验证的真实 P-256 签名私钥与 Ticket Guard 票据，并实现 30 天超长有效期安全持久化复用；
+1. **Guard 私钥与票据持久化**：登录后的纯 Rust Web/IM 引导按官方流程取得 P-256 Guard 私钥与 Ticket Guard 票据，再加密持久化复用；
 2. **全流程 Signed 签名**：每次发信时均通过真实私钥进行 HMAC/ECDSA 计算，携带真实 `bd-ticket-guard-client-data`、`ts_sign`，将发信模式彻底升级为 100% `Signed`；
 3. **报文指纹严格对齐**：完整补齐 Protobuf 19 项环境特征扩展头，动态派生高精度时间戳与安全令牌；
-4. **实测验收**：在真实多账号互发场景下进行了多轮验证，发信成功率达 100%，会话稳定常青，彻底消除 KICK 下线风险。
+4. **边界说明**：`sid_guard` 仍存在官方绝对有效期。系统通过原生 TokenBeat、Web TokenBeat、Cookie 轮换重绑和 Guard 票据自愈最大化静默可用时间，但不能承诺账号永久不需要重新登录。
 
 ---
 
@@ -119,6 +107,8 @@ SparkLight/
 │   ├── db/                     # SQLite 数据库模型与 CRUD
 │   ├── douyin/                 # 纯 Rust 抖音协议栈
 │   │   ├── client.rs           # 核心客户端接口
+│   │   ├── device_profile.rs   # 账号级确定性设备指纹
+│   │   ├── login.rs            # 纯 Rust App 二维码登录、原生校验与 TokenBeat
 │   │   ├── pcim_guard.rs       # P-256 密钥对、签名与票据绑定
 │   │   ├── pcim_init.rs        # PCIM 消息报文装配与严格 ACK 解析
 │   │   ├── pcim_dtrait.rs      # DTrait 820 字节加密设备指纹
@@ -130,14 +120,13 @@ SparkLight/
 ├── frontend/                   # React 18 + TypeScript + TailwindCSS 控制台
 │   ├── src/
 │   │   ├── pages/LoginPage.tsx # 安全登录页
-│   │   ├── pages/AccountsPage.tsx # 账号管理与凭证提取指引
+│   │   ├── pages/AccountsPage.tsx # 账号管理与 App 二维码登录
 │   │   ├── pages/TargetsPage.tsx  # 目标管理、头像展示与备注编辑
 │   │   ├── pages/DashboardPage.tsx# 系统状态大盘
 │   │   ├── pages/LogsPage.tsx  # 交互与调度审计日志
 │   │   └── pages/SettingsPage.tsx # 定时时间与 Bark 配置
 │   └── dist/                   # 预构建前端静态资源 (由 Rust 自动托管)
-├── tools/
-│   └── sparklight_extractor.user.js # 官方推荐：油猴全自动凭证提取脚本 (v2.2.0)
+├── tools/                      # 离线分析与验收脚本（不参与运行时）
 └── tests/
     └── api_auth_test.rs        # 接口鉴权与加密集成测试
 ```
@@ -146,7 +135,7 @@ SparkLight/
 
 ## 启动与部署
 
-### 方式一：Docker Compose 容器化部署（推荐）
+### 方式一：Docker Compose 容器化运行
 
 在项目根目录下执行：
 
@@ -162,9 +151,11 @@ docker compose logs -f
 
 容器将持久化挂载 `./data` 目录用于存储 SQLite 数据库与加密主密钥。默认开放映射端口为 `11090`，可通过 `http://<服务器IP>:11090` 访问。
 
+容器镜像不安装浏览器或扩展。受信任设备可直接在 Web 控制台扫码；新设备被 `4044` 拒绝时，镜像内置的 `native_session_import` 可导入官方 Android 原生会话。
+
 ---
 
-### 方式二：裸机直接编译运行
+### 方式二：宿主机直接编译运行
 
 #### 1. 编译前端（若已存在 `frontend/dist` 可跳过）
 ```bash
@@ -175,6 +166,8 @@ cd frontend && npm install && npm run build && cd ..
 ```bash
 cargo run --release
 ```
+
+登录与续期不需要图形环境，也不需要安装浏览器。服务只需能访问抖音官方 HTTPS 接口。
 
 服务启动后将监听配置的端口。首次启动时将在终端打印生成的系统管理 API Key：
 ```text

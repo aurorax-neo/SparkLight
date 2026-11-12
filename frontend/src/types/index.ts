@@ -5,7 +5,10 @@ export interface AccountDto {
   uid?: string;
   nickname?: string;
   avatar_url?: string;
-  masked_cookie: string;
+  native_ready: boolean;
+  native_sid_expires_at?: number | null;
+  native_last_verified_at?: number | null;
+  native_last_beat_at?: number | null;
   status: 'ACTIVE' | 'EXPIRED' | 'DISABLED';
   bark_key_override?: string;
   targets_count: number;
@@ -34,7 +37,7 @@ export interface SparkTarget {
   today_checked_at?: string | null;
   message_template: string;
   last_sent_at?: string;
-  last_status?: 'SUCCESS' | 'FAILED';
+  last_status?: 'SUCCESS' | 'PENDING' | 'FAILED';
   last_error?: string;
   created_at: string;
   updated_at: string;
@@ -47,7 +50,7 @@ export interface SparkLog {
   target_id?: string;
   target_nickname?: string;
   action_type: 'CHECK_COOKIE' | 'SEND_SPARK' | 'REFRESH_COOKIE' | 'ACCOUNT_EXECUTION' | 'TEST_SPARK' | 'PRE_SEND_CHECK' | 'POST_SEND_CHECK';
-  status: 'SUCCESS' | 'FAILED';
+  status: 'SUCCESS' | 'PENDING' | 'FAILED';
   message: string;
   created_at: string;
 }
@@ -84,4 +87,37 @@ export interface DouyinFriend {
   target_type?: number; // 1 = 单聊, 2 = 群聊
   conversation_id?: string;
   remark_name?: string;
+}
+
+export interface SparkTemplateItem {
+  id: string;
+  name: string;
+  content: string;
+  description: string;
+  builtin: boolean;
+}
+
+export interface TemplateVariableInfo {
+  token: string;
+  label: string;
+  example: string;
+}
+
+export interface TemplatesConfigDto {
+  default_template: string;
+  presets: SparkTemplateItem[];
+  custom_templates: SparkTemplateItem[];
+  variables: TemplateVariableInfo[];
+}
+
+export interface YiyanQuote {
+  hitokoto: string;
+  from: string;
+  raw_from: string;
+}
+
+export interface TemplatePreviewResult {
+  rendered: string;
+  quote?: YiyanQuote | null;
+  is_fallback: boolean;
 }

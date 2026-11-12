@@ -24,8 +24,17 @@ local.env
 
 # Agent & Workspace State
 .pi/
+.analysis/
+ref/
+androguard.db
+sparklight-login-qr.png
+sparklight-login-url.txt
 deploy_release.tar.gz
 
 # System & OS
 .DS_Store
 Thumbs.db
+
+# Release build staging
+docker-bin/
+release-packages/

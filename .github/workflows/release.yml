@@ -1,0 +1,405 @@
+name: Release & Publish
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '发布版本号 (例如 v0.1.0)'
+        required: false
+        default: 'v0.1.0'
+
+permissions:
+  contents: write
+  packages: write
+
+# 开启并发控制，重推 Tag 或修复时自动取消前序挂起任务
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # 前置门禁：校验 SemVer Tag、Cargo.toml 版本号与 CHANGELOG.md 条目一致性
+  validate:
+    name: Validate Release Metadata
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.meta.outputs.tag }}
+      version: ${{ steps.meta.outputs.version }}
+      prerelease: ${{ steps.meta.outputs.prerelease }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Validate tag format (SemVer)
+        id: meta
+        shell: bash
+        run: |
+          TAG="${{ inputs.tag || github.ref_name }}"
+          if ! [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::Tag '$TAG' 不符合 SemVer（应为 vX.Y.Z 或 vX.Y.Z-pre）"
+            exit 1
+          fi
+          VER="${TAG#v}"
+          IS_PRERELEASE=false
+          if [[ "$TAG" == *-* ]]; then
+            IS_PRERELEASE=true
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=$VER" >> "$GITHUB_OUTPUT"
+          echo "prerelease=$IS_PRERELEASE" >> "$GITHUB_OUTPUT"
+
+      - name: Verify version matches Tag
+        shell: bash
+        run: |
+          VER="${{ steps.meta.outputs.version }}"
+          SRC_VER=$(grep -m1 '^version' Cargo.toml | sed -E 's/.*"(.*)".*/\1/')
+          if [ "$SRC_VER" != "$VER" ]; then
+            echo "::error::Cargo.toml version=$SRC_VER 与 Tag=$VER 不一致"
+            exit 1
+          fi
+          FE_VER=$(node -p "require('./frontend/package.json').version")
+          if [ "$FE_VER" != "$VER" ]; then
+            echo "::error::frontend/package.json version=$FE_VER 与 Tag=$VER 不一致"
+            exit 1
+          fi
+
+      - name: Verify CHANGELOG entry
+        shell: bash
+        run: |
+          VER="${{ steps.meta.outputs.version }}"
+          VER_RE="${VER//./\\.}"
+          if ! grep -qE "^##[[:space:]]+(\[${VER_RE}\]|${VER_RE})([[:space:]]|$)" CHANGELOG.md; then
+            echo "::error::CHANGELOG.md 缺少版本 $VER 的条目，请先补充后重推 Tag"
+            exit 1
+          fi
+          BODY=$(awk -v ver="$VER" '
+            $0 ~ "^##[[:space:]]+(\\["ver"\\]|"ver")([[:space:]]|$)" {flag=1; next}
+            flag && /^## / {exit}
+            flag && NF {print}
+          ' CHANGELOG.md)
+          if [ -z "${BODY//[[:space:]]/}" ]; then
+            echo "::error::CHANGELOG.md 中版本 $VER 内容为空"
+            exit 1
+          fi
+
+  # 阶段 1: 前端构建
+  build-frontend:
+    name: Build Frontend UI
+    needs: validate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Remove local package proxy in CI
+        shell: bash
+        run: rm -f .cargo/config.toml frontend/.npmrc
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Build frontend
+        working-directory: frontend
+        run: npm run build
+
+      - name: Upload frontend artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-dist
+          path: frontend/dist/
+          retention-days: 1
+
+  # 阶段 2: 多架构二进制并行交叉编译
+  build-binaries:
+    name: Build Binary (${{ matrix.target }})
+    needs: [validate, build-frontend]
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            use_cross: false
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-musl
+            use_cross: true
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            use_cross: false
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            use_cross: false
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            use_cross: false
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # 剥离本地特有的国内代理配置，防止海外 Runner 访问超时
+      - name: Remove local package proxy in CI
+        shell: bash
+        run: rm -f .cargo/config.toml frontend/.npmrc
+
+      - name: Download frontend artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: frontend-dist
+          path: frontend/dist
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache Cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+          key: cargo-${{ runner.os }}-${{ matrix.target }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            cargo-${{ runner.os }}-${{ matrix.target }}-
+            cargo-${{ runner.os }}-
+
+      - name: Install musl tools on Linux
+        if: matrix.os == 'ubuntu-latest' && !matrix.use_cross
+        run: sudo apt-get update && sudo apt-get install -y musl-tools musl-dev
+
+      - name: Install Cross
+        if: matrix.use_cross
+        run: cargo install cross --git https://github.com/cross-rs/cross
+
+      - name: Build target binaries
+        shell: bash
+        run: |
+          if [ "${{ matrix.use_cross }}" = "true" ]; then
+            cross build --locked --release --target ${{ matrix.target }} --bin sparklight --bin native_session_import
+          else
+            cargo build --locked --release --target ${{ matrix.target }} --bin sparklight --bin native_session_import
+          fi
+
+      - name: Package archive
+        shell: bash
+        run: |
+          TAG_NAME="${{ needs.validate.outputs.tag }}"
+          PKG_NAME="sparklight_${TAG_NAME}_${{ matrix.target }}"
+          ROOT_DIR="$(pwd)"
+          mkdir -p "${ROOT_DIR}/release-packages" release-pkg/frontend
+
+          EXT=""
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            EXT=".exe"
+          fi
+
+          cp "target/${{ matrix.target }}/release/sparklight${EXT}" "release-pkg/sparklight${EXT}"
+          cp "target/${{ matrix.target }}/release/native_session_import${EXT}" "release-pkg/native_session_import${EXT}"
+          cp -r frontend/dist release-pkg/frontend/dist
+          cp README.md release-pkg/ 2>/dev/null || true
+          cp LICENSE release-pkg/ 2>/dev/null || true
+          cp CHANGELOG.md release-pkg/ 2>/dev/null || true
+
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            cd release-pkg
+            7z a "$(cygpath -w "${ROOT_DIR}/release-packages/${PKG_NAME}.zip")" *
+          else
+            cd release-pkg
+            tar -czvf "${ROOT_DIR}/release-packages/${PKG_NAME}.tar.gz" *
+          fi
+
+      - name: Upload package artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: package-${{ matrix.target }}
+          path: release-packages/*
+          retention-days: 1
+
+  # 阶段 3: 发布 GitHub Release 静态包与校验和（含发布日志强校验）
+  publish-release:
+    name: Publish GitHub Release Assets
+    needs: [validate, build-binaries]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Validate tag format (SemVer)
+        shell: bash
+        run: |
+          TAG="${{ needs.validate.outputs.tag }}"
+          if ! [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::Tag '$TAG' 不符合 SemVer（应为 vX.Y.Z 或 vX.Y.Z-pre）"
+            exit 1
+          fi
+
+      - name: Verify version matches Tag
+        shell: bash
+        run: |
+          VER="${{ needs.validate.outputs.version }}"
+          SRC_VER=$(grep -m1 '^version' Cargo.toml | sed -E 's/.*"(.*)".*/\1/')
+          if [ "$SRC_VER" != "$VER" ]; then
+            echo "::error::Cargo.toml version=$SRC_VER 与 Tag=$VER 不一致"
+            exit 1
+          fi
+
+      - name: Verify CHANGELOG entry
+        shell: bash
+        run: |
+          VER="${{ needs.validate.outputs.version }}"
+          VER_RE="${VER//./\\.}"
+          if ! grep -qE "^##[[:space:]]+(\[${VER_RE}\]|${VER_RE})([[:space:]]|$)" CHANGELOG.md; then
+            echo "::error::CHANGELOG.md 缺少版本 $VER 的条目，请先补充后重推 Tag"
+            exit 1
+          fi
+
+      - name: Extract release body from CHANGELOG
+        id: changelog
+        shell: bash
+        run: |
+          VER="${{ needs.validate.outputs.version }}"
+          BODY=$(awk -v ver="$VER" '
+            $0 ~ "^##[[:space:]]+(\\["ver"\\]|"ver")([[:space:]]|$)" {flag=1; next}
+            flag && /^## / {exit}
+            flag && NF {print}
+          ' CHANGELOG.md)
+          if [ -z "${BODY//[[:space:]]/}" ]; then
+            echo "::error::CHANGELOG 中版本 $VER 内容为空"
+            exit 1
+          fi
+          { echo "body<<__EOF__"; echo "$BODY"; echo "__EOF__"; } >> "$GITHUB_OUTPUT"
+
+      - name: Download all package artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: downloaded-artifacts
+          pattern: package-*
+          merge-multiple: true
+
+      - name: Generate Checksums
+        shell: bash
+        run: |
+          mkdir -p release-assets
+          cp downloaded-artifacts/* release-assets/
+          cd release-assets && sha256sum * > checksums.txt
+
+      - name: Upload assets to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release-assets/*
+          tag_name: ${{ needs.validate.outputs.tag }}
+          body: ${{ steps.changelog.outputs.body }}
+          generate_release_notes: false
+          draft: false
+          prerelease: ${{ needs.validate.outputs.prerelease == 'true' }}
+
+  # 阶段 4: 秒级发布多架构 Docker 镜像 (复用已编译产物)
+  docker:
+    name: Publish Multi-arch Docker Image to GHCR
+    needs: [validate, build-binaries]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download frontend artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: frontend-dist
+          path: frontend/dist
+
+      - name: Download linux-amd64 binary artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: package-x86_64-unknown-linux-musl
+          path: pkg-amd64
+
+      - name: Download linux-arm64 binary artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: package-aarch64-unknown-linux-musl
+          path: pkg-arm64
+
+      - name: Prepare multi-arch binaries
+        shell: bash
+        run: |
+          mkdir -p docker-bin/amd64 docker-bin/arm64
+          tar -xvf pkg-amd64/*.tar.gz -C docker-bin/amd64/
+          tar -xvf pkg-arm64/*.tar.gz -C docker-bin/arm64/
+          chmod +x docker-bin/amd64/sparklight docker-bin/amd64/native_session_import \
+                   docker-bin/arm64/sparklight docker-bin/arm64/native_session_import
+          ls -la docker-bin/amd64/ docker-bin/arm64/
+
+      - name: Resolve lower-case image repository
+        id: repo
+        shell: bash
+        run: |
+          IMAGE=$(echo "ghcr.io/${{ github.repository_owner }}/sparklight" | tr '[:upper:]' '[:lower:]')
+          echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry (GHCR)
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ steps.repo.outputs.image }}
+          tags: |
+            type=semver,pattern={{version}},value=${{ needs.validate.outputs.tag }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ needs.validate.outputs.tag }},enable=${{ needs.validate.outputs.prerelease == 'false' }}
+            type=raw,value=latest,enable=${{ needs.validate.outputs.prerelease == 'false' }}
+
+      - name: Build and push multi-arch image
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.release
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # 记录镜像 digest 到 Job Summary，保证发布可追溯
+      - name: Record image digest
+        shell: bash
+        run: |
+          IMAGE="${{ steps.repo.outputs.image }}"
+          VER="${{ needs.validate.outputs.version }}"
+          DIGEST="${{ steps.build.outputs.digest }}"
+          if [ -z "$DIGEST" ]; then
+            DIGEST=$(docker buildx imagetools inspect "${IMAGE}:${VER}" --format '{{json .Manifest}}' \
+                     | jq -r '.digest' 2>/dev/null || echo "unknown")
+          fi
+          {
+            echo "### 📦 Multi-arch image published"
+            echo "- Image: \`${IMAGE}:${VER}\`"
+            echo "- Digest: \`${DIGEST}\`"
+            echo "- Platforms: linux/amd64, linux/arm64"
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -1,5 +1,5 @@
-use std::path::PathBuf;
 use anyhow::Result;
+use std::path::PathBuf;
 
 #[derive(Clone, Debug)]
 pub struct AppConfig {
@@ -51,8 +51,8 @@ impl AppConfig {
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty());
 
-        let spark_time = std::env::var("SPARK_SCHEDULE_TIME")
-            .unwrap_or_else(|_| "09:30".to_string());
+        let spark_time =
+            std::env::var("SPARK_SCHEDULE_TIME").unwrap_or_else(|_| "09:30".to_string());
 
         let min_delay_secs = std::env::var("SPARK_MIN_DELAY_SECS")
             .ok()
